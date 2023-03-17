@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 
 from ultralytics.yolo.utils import LOGGER, TryExcept
-from ultralytics.yolo.utils.piou_loss.pixel_weights import PIoU, Pious, template_pixels, template_w_pixels
 
 
 # boxes
@@ -298,35 +297,6 @@ def obb_iou_for_metrics(box1, box2, choice="rotated_iou", eps=1e-7):
 
     if choice == "miou":
         return obb_iou_plain(box1, box2, eps=1e-7)
-    elif choice in ["piou", "piou_python", "piou_cuda"]:
-        assert torch.max(box1) > 2.0
-        assert isinstance(box1, torch.Tensor) and isinstance(box2, torch.Tensor)
-        
-        width = torch.max(torch.cat((box1[:,[0, 2, 4, 6]], box2[:,[0, 2, 4, 6]]), dim=0)).int()
-        height = torch.max(torch.cat((box1[:,[1, 3, 5, 7]], box2[:,[1, 3, 5, 7]]), dim=0)).int()
-        grid_xy = template_pixels(height=height, width=width).to(box1.device)
-        grid_x = template_w_pixels(width=width).to(box1.device)
-
-        N = box1.shape[0]
-        M = box2.shape[0]
-        
-        box1 = xyxyxyxya2xywha(box1)
-        box2 = xyxyxyxya2xywha(box2)
-        if choice == "piou_python":
-            pious = box1.clone().resize_((N, M))
-            for i in range(M):
-                _, piou = PIoU(box1, box2[i].unsqueeze(0).repeat(N, 1).contiguous(), grid_xy, k=10)
-                # print(f"piou: {piou.data}")
-                pious[:, i] = piou
-            return pious
-        else:
-            pious = box1.clone().resize_((N, M))
-            PiousF = Pious(10)
-            for i in range(M):
-                piou = PiousF(box1, box2[i].unsqueeze(0).repeat(N, 1).contiguous(), grid_x)
-                # print(f"piou: {piou.data}")
-                pious[:, i] = piou
-            return pious
     elif choice in ["rotated_iou"]:
         from mmcv.ops import diff_iou_rotated_2d
 

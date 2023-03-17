@@ -1,0 +1,6 @@
+nc: 3
+# train: E:\data\aiprj\yolov8043obb\mydata\train.txt
+# val:  E:\data\aiprj\yolov8043obb\mydata\val.txt
+train: /root/autodl-tmp/yolov8043obb/mydata/train.txt
+val: /root/autodl-tmp/yolov8043obb/mydata/val.txt
+names: ["aircraft_carrier", "warcraft", "merchant_ship"]
