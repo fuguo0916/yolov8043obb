@@ -1,8 +1,10 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 """
 Model validation metrics
 """
 import math
+import random
 import warnings
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from ultralytics.yolo.utils import LOGGER, TryExcept
+from ultralytics.yolo.utils.piou_loss.pixel_weights import PIoU, Pious, template_pixels, template_w_pixels
 
 
 # boxes
@@ -54,13 +57,17 @@ def box_iou(box1, box2, eps=1e-7):
         iou (Tensor[N, M]): the NxM matrix containing the pairwise
             IoU values for every element in boxes1 and boxes2
     """
+    assert len(box1.shape) == 2 and len(box2.shape) == 2
+    assert box1.shape[-1] == 4 and box2.shape[-1] == 4
 
     # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
     (a1, a2), (b1, b2) = box1.unsqueeze(1).chunk(2, 2), box2.unsqueeze(0).chunk(2, 2)
     inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp(0).prod(2)
 
     # IoU = inter / (area1 + area2 - inter)
-    return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
+    iou = inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
+    assert len(iou.shape) == 2 and iou.shape[0] == box1.shape[0] and iou.shape[1] == box2.shape[0]
+    return iou
 
 
 def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
@@ -104,6 +111,267 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
     return iou  # IoU
 
 
+def get_enclosing_hbb(box):
+    """FG
+    Args:
+        box: obb(s) in unknown format
+    Return:
+        hbb(s) in Poly format
+    """
+    assert box.shape[-1] == 9
+    xmin = torch.min(box[..., [0, 2, 4, 6]], dim=-1, keepdim=True)[0]
+    xmax = torch.max(box[..., [0, 2, 4, 6]], dim=-1, keepdim=True)[0]
+    ymin = torch.min(box[..., [1, 3, 5, 7]], dim=-1, keepdim=True)[0]
+    ymax = torch.max(box[..., [1, 3, 5, 7]], dim=-1, keepdim=True)[0]
+    hbb = torch.cat([xmin, ymin, xmax, ymax], dim=-1)
+    assert hbb.shape[:-1] == box.shape[:-1] and hbb.shape[-1] == 4
+    return hbb
+
+
+# https://github.com/open-mmlab/mmrotate
+def xy_wh_r_2_xy_sigma(xywhr):
+    """Convert oriented bounding box to 2-D Gaussian distribution.
+
+    Args:
+        xywhr (torch.Tensor): rbboxes with shape (N, 5).
+
+    Returns:
+        xy (torch.Tensor): center point of 2-D Gaussian distribution
+            with shape (N, 2).
+        sigma (torch.Tensor): covariance matrix of 2-D Gaussian distribution
+            with shape (N, 2, 2).
+    """
+    _shape = xywhr.shape
+    assert _shape[-1] == 5
+    xy = xywhr[..., :2]
+    wh = xywhr[..., 2:4].clamp(min=1e-7, max=1e7).reshape(-1, 2)
+    r = xywhr[..., 4]
+    cos_r = torch.cos(r)
+    sin_r = torch.sin(r)
+    R = torch.stack((cos_r, -sin_r, sin_r, cos_r), dim=-1).reshape(-1, 2, 2)
+    S = 0.5 * torch.diag_embed(wh)
+
+    sigma = R.bmm(S.square()).bmm(R.permute(0, 2,
+                                            1)).reshape(_shape[:-1] + (2, 2))
+
+    return xy, sigma
+
+
+# https://github.com/open-mmlab/mmrotate
+def kfiou(pred, target, pred_decode=None, targets_decode=None, beta=1.0 / 9.0, eps=1e-6):
+    """Kalman filter IoU.
+
+    Args:
+        pred (torch.Tensor): Predicted bboxes.
+        target (torch.Tensor): Corresponding gt bboxes.
+        pred_decode (torch.Tensor): Predicted decode bboxes.
+        targets_decode (torch.Tensor): Corresponding gt decode bboxes.
+        fun (str): The function applied to distance. Defaults to None.
+        beta (float): Defaults to 1.0/9.0.
+        eps (float): Defaults to 1e-6.
+
+    Returns:
+        kfiou (torch.Tensor)
+    """
+    xy_p = pred[:, :2]
+    xy_t = target[:, :2]
+    _, Sigma_p = xy_wh_r_2_xy_sigma(pred_decode)
+    _, Sigma_t = xy_wh_r_2_xy_sigma(targets_decode)
+
+    # Smooth-L1 norm
+    diff = torch.abs(xy_p - xy_t)
+    xy_loss = torch.where(diff < beta, 0.5 * diff * diff / beta,
+                        diff - 0.5 * beta).sum(dim=-1)
+    Vb_p = 4 * Sigma_p.det().sqrt()
+    Vb_t = 4 * Sigma_t.det().sqrt()
+    K = Sigma_p.bmm((Sigma_p + Sigma_t).inverse())
+    Sigma = Sigma_p - K.bmm(Sigma_p)
+    Vb = 4 * Sigma.det().sqrt()
+    Vb = torch.where(torch.isnan(Vb), torch.full_like(Vb, 0), Vb)
+    KFIoU = Vb / (Vb_p + Vb_t - Vb + eps)
+
+    # if fun == 'ln':
+    #     kf_loss = -torch.log(KFIoU + eps)
+    # elif fun == 'exp':
+    #     kf_loss = torch.exp(1 - KFIoU) - 1
+    # else:
+    #     kf_loss = 1 - KFIoU
+
+    # loss = (xy_loss + kf_loss).clamp(0)
+
+    return KFIoU
+    
+
+
+def obb_iou(box1, box2, eps=1e-7, choice="miou"):
+    """FG
+    Args:
+        box1: shape (..., 9)
+        box2: shape (..., 9)
+    Return:
+        obb_iou with shape (..., 1)
+    """
+    assert box1.shape[-1] == box2.shape[-1]
+    assert box1.shape[-1] == 9
+    if choice == "miou":
+        angle1 = box1[..., -1:]
+        angle2 = box2[..., -1:]
+        angle_difference = angle1 - angle2
+        angle_similarity = torch.abs(torch.cos(angle_difference))
+        box1 = get_enclosing_hbb(box1)
+        box2 = get_enclosing_hbb(box2)
+        hbb_iou = bbox_iou(box1, box2, xywh=False, eps=eps)
+        iou = hbb_iou * angle_similarity
+    elif choice == "kfiou":
+        def xyxyxyxya2xywha(x):
+            """FG
+            Args:
+                x: boxes, the last dim is 9
+            Return:
+                y with almost same shape
+            """
+            if isinstance(x, torch.Tensor):
+                assert x.shape[-1] == 9
+                y = x.clone()
+                y.resize_(list(x.shape[:-1]) + [5,])
+                y[..., 0:2] = (x[..., 0:2] + x[..., 4:6]) / 2.0  # xy
+                y[..., 2] = torch.sqrt(torch.pow(x[..., 2] - x[..., 4], 2) + torch.pow(x[..., 3] - x[..., 5], 2))  # w: distance between x2y2 and x3y3
+                y[..., 3] = torch.sqrt(torch.pow(x[..., 0] - x[..., 2], 2) + torch.pow(x[..., 1] - x[..., 3], 2))  # h: distance between x1y1 and x2y2
+                y[..., 4] = x[..., 8]
+            else:
+                assert len(x.shape) == 2 and x.shape[-1] == 9
+                y = np.copy(x)
+                y.resize((x.shape[0], 5), refcheck=False)
+                y[:, 0:2] = (x[:, 0:2] + x[:, 4:6]) / 2.0  # xy
+                y[:, 2] = np.sqrt(np.power(x[:, 2] - x[:, 4], 2) + np.power(x[:, 3] - x[:, 5], 2))  # w
+                y[:, 3] = np.sqrt(np.power(x[:, 0] - x[:, 2], 2) + np.power(x[:, 1] - x[:, 3], 2))  # h
+                y[:, 4] = x[:, 8]
+            assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 5
+            return y
+
+        box1 = xyxyxyxya2xywha(box1)
+        box2 = xyxyxyxya2xywha(box2)
+        print(f"box1: {box1.shape}\nbox2: {box2.shape}")
+        iou = kfiou(box1, box2, box1, box2)
+        assert False, f"\nbox1: {box1.shape}\nbox2: {box2.shape}\nkfiou: {iou.shape}"
+        
+    assert iou.shape[-1] == 1
+    return iou
+
+        
+
+
+
+def obb_iou_for_metrics(box1, box2, choice="rotated_iou", eps=1e-7):
+    """FG
+    Args:
+        box1: obb with shape (N, 5/9)
+        box2: obb with shape (M, 5/9)
+    Return:
+        iou between box1 and box2 with shape (N, M)
+    """
+    def xyxyxyxya2xywha(x):
+        """FG
+        Args:
+            x: boxes, the last dim is 9
+        Return:
+            y with almost same shape
+        """
+        if isinstance(x, torch.Tensor):
+            assert x.shape[-1] == 9
+            y = x.clone()
+            y.resize_(list(x.shape[:-1]) + [5,])
+            y[..., 0:2] = (x[..., 0:2] + x[..., 4:6]) / 2.0  # xy
+            y[..., 2] = torch.sqrt(torch.pow(x[..., 2] - x[..., 4], 2) + torch.pow(x[..., 3] - x[..., 5], 2))  # w: distance between x2y2 and x3y3
+            y[..., 3] = torch.sqrt(torch.pow(x[..., 0] - x[..., 2], 2) + torch.pow(x[..., 1] - x[..., 3], 2))  # h: distance between x1y1 and x2y2
+            y[..., 4] = x[..., 8]
+        else:
+            assert len(x.shape) == 2 and x.shape[-1] == 9
+            y = np.copy(x)
+            y.resize((x.shape[0], 5), refcheck=False)
+            y[:, 0:2] = (x[:, 0:2] + x[:, 4:6]) / 2.0  # xy
+            y[:, 2] = np.sqrt(np.power(x[:, 2] - x[:, 4], 2) + np.power(x[:, 3] - x[:, 5], 2))  # w
+            y[:, 3] = np.sqrt(np.power(x[:, 0] - x[:, 2], 2) + np.power(x[:, 1] - x[:, 3], 2))  # h
+            y[:, 4] = x[:, 8]
+        assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 5
+        return y
+
+    if choice == "miou":
+        return obb_iou_plain(box1, box2, eps=1e-7)
+    elif choice in ["piou", "piou_python", "piou_cuda"]:
+        assert torch.max(box1) > 2.0
+        assert isinstance(box1, torch.Tensor) and isinstance(box2, torch.Tensor)
+        
+        width = torch.max(torch.cat((box1[:,[0, 2, 4, 6]], box2[:,[0, 2, 4, 6]]), dim=0)).int()
+        height = torch.max(torch.cat((box1[:,[1, 3, 5, 7]], box2[:,[1, 3, 5, 7]]), dim=0)).int()
+        grid_xy = template_pixels(height=height, width=width).to(box1.device)
+        grid_x = template_w_pixels(width=width).to(box1.device)
+
+        N = box1.shape[0]
+        M = box2.shape[0]
+        
+        box1 = xyxyxyxya2xywha(box1)
+        box2 = xyxyxyxya2xywha(box2)
+        if choice == "piou_python":
+            pious = box1.clone().resize_((N, M))
+            for i in range(M):
+                _, piou = PIoU(box1, box2[i].unsqueeze(0).repeat(N, 1).contiguous(), grid_xy, k=10)
+                # print(f"piou: {piou.data}")
+                pious[:, i] = piou
+            return pious
+        else:
+            pious = box1.clone().resize_((N, M))
+            PiousF = Pious(10)
+            for i in range(M):
+                piou = PiousF(box1, box2[i].unsqueeze(0).repeat(N, 1).contiguous(), grid_x)
+                # print(f"piou: {piou.data}")
+                pious[:, i] = piou
+            return pious
+    elif choice in ["rotated_iou"]:
+        from mmcv.ops import diff_iou_rotated_2d
+
+        assert torch.max(box1) > 2.0
+        assert isinstance(box1, torch.Tensor) and isinstance(box2, torch.Tensor)
+        
+        N = box1.shape[0]
+        M = box2.shape[0]
+        
+        box1 = xyxyxyxya2xywha(box1)
+        box2 = xyxyxyxya2xywha(box2)
+        pious = box1.clone().resize_((N, M))
+        for i in range(M):
+            piou = diff_iou_rotated_2d(box1.unsqueeze(0), box2[i].unsqueeze(0).repeat(N, 1).contiguous().unsqueeze(0)).view(-1)
+            # print(f"piou: {piou.data}")
+            pious[:, i] = piou
+        return pious
+
+    else:
+        assert False
+
+
+def obb_iou_plain(box1, box2, eps=1e-7):
+    """FG
+    Args:
+        box1: obb with shape (N, 5/9)
+        box2: obb with shape (M, 5/9)
+    Return:
+        plain iou between box1 and box2 with shape (N, M)
+    """
+    assert len(box1.shape) == 2 and len(box2.shape) == 2
+    assert box1.shape[-1] == box2.shape[-1]
+    assert box1.shape[-1] == 9
+    angle1 = box1[..., -1]
+    angle2 = box2[..., -1]
+    angle_difference = angle1.unsqueeze(1) - angle2.unsqueeze(0)
+    angle_similarity = torch.abs(torch.cos(angle_difference))
+    box1 = get_enclosing_hbb(box1)
+    box2 = get_enclosing_hbb(box2)
+    hbb_iou = box_iou(box1, box2)
+    iou = hbb_iou * angle_similarity
+    assert len(iou.shape) == 2 and iou.shape[0] == box1.shape[0] and iou.shape[1] == box2.shape[0]
+    return iou
+
+
 def mask_iou(mask1, mask2, eps=1e-7):
     """
     mask1: [N, n] m1 means number of predicted objects
@@ -126,6 +394,24 @@ def masks_iou(mask1, mask2, eps=1e-7):
     intersection = (mask1 * mask2).sum(1).clamp(0)  # (N, )
     union = (mask1.sum(1) + mask2.sum(1))[None] - intersection  # (area1 + area2) - intersection
     return intersection / (union + eps)
+
+
+def obb_nms(obbs, iou_threshold):
+    hbbs = get_enclosing_hbb(obbs)
+    n = obbs.shape[0]
+    # if n > 100:
+    #     iou_threshold /= 10
+    valid_list = [1 for _ in range(n)]
+    for i in range(n):
+        if valid_list[i] == 1:
+            for j in range(i + 1, n):
+                if valid_list[j] == 1:
+                    hbb_iou = bbox_iou(hbbs[i], hbbs[j], xywh=False)
+                    angle_similarity = torch.abs(1 - (torch.abs(obbs[i][8:] - obbs[j][8:]) / 1.5707))
+                    if hbb_iou * angle_similarity < iou_threshold:
+                        valid_list[j] = 0
+    valid_list = torch.tensor(valid_list, device=obbs.device)
+    return valid_list
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
@@ -175,10 +461,10 @@ class ConfusionMatrix:
     def process_batch(self, detections, labels):
         """
         Return intersection-over-union (Jaccard index) of boxes.
-        Both sets of boxes are expected to be in (x1, y1, x2, y2) format.
+        Both sets of boxes are expected to be in Pixel-PolyTheta format.
         Arguments:
-            detections (Array[N, 6]), x1, y1, x2, y2, conf, class
-            labels (Array[M, 5]), class, x1, y1, x2, y2
+            detections (Array[N, 11]), Pixel-PolyTheta box, conf, class
+            labels (Array[M, 10]), class, Pixel-PolyTheta box
         Returns:
             None, updates confusion matrix accordingly
         """
@@ -188,14 +474,14 @@ class ConfusionMatrix:
                 self.matrix[self.nc, gc] += 1  # background FN
             return
 
-        detections = detections[detections[:, 4] > self.conf]
+        detections = detections[detections[:, 9] > self.conf]
         gt_classes = labels[:, 0].int()
-        detection_classes = detections[:, 5].int()
-        iou = box_iou(labels[:, 1:], detections[:, :4])
+        detection_classes = detections[:, 10].int()
+        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9])  # (num_gt, num_pred)
 
-        x = torch.where(iou > self.iou_thres)
+        x = torch.where(iou > self.iou_thres)  # (n_pass, 2)
         if x[0].shape[0]:
-            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
+            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()  # n_pass * (gt_idx, pred_idx, iou)
             if x[0].shape[0] > 1:
                 matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
@@ -205,7 +491,7 @@ class ConfusionMatrix:
             matches = np.zeros((0, 3))
 
         n = matches.shape[0] > 0
-        m0, m1, _ = matches.transpose().astype(int)
+        m0, m1, _ = matches.transpose().astype(int)  # m0: (n_pass,) gt_idx; m1: (n_pass,) pred_idx
         for i, gc in enumerate(gt_classes):
             j = m0 == i
             if n and sum(j) == 1:
@@ -347,27 +633,35 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=Path(), na
     """ Compute the average precision, given the recall and precision curves.
     Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
     # Arguments
-        tp:  True positives (nparray, nx1 or nx10).
-        conf:  Objectness value from 0-1 (nparray).
-        pred_cls:  Predicted object classes (nparray).
-        target_cls:  True object classes (nparray).
+        tp:  True positives (nparray, nx1 or nx10). ndarray(t_npr, niou) T/F
+        conf:  Objectness value from 0-1 (nparray). ndarray(t_npr,)
+        pred_cls:  Predicted object classes (nparray). ndarray(t_npr,)
+        target_cls:  True object classes (nparray). ndarray(t_nl,)
         plot:  Plot precision-recall curve at mAP@0.5
         save_dir:  Plot save directory
     # Returns
         The average precision as computed in py-faster-rcnn.
+        tp: ndarray(nc,) absolute tp numbers
+        fp: ndarray(nc,) absolute fp numbers
+        p: ndarray(nc,) precision at first iou level at sumit of f1
+        r: ndarray(nc,) recall at first iou level at sumit of f1
+        f1: ndarray(nc,) the max f1 score at first iou level
+        ap: ndarray(nc, niou)
+        unique_classes: ndarray(nc,) int
     """
 
     # Sort by objectness
     i = np.argsort(-conf)
+    #
     tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
 
     # Find unique classes
-    unique_classes, nt = np.unique(target_cls, return_counts=True)
+    unique_classes, nt = np.unique(target_cls, return_counts=True)  ## ndarray(nc,) clses, ndarray(nc,) counts
     nc = unique_classes.shape[0]  # number of classes, number of detections
 
     # Create Precision-Recall curve and compute AP for each class
-    px, py = np.linspace(0, 1, 1000), []  # for plotting
-    ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))
+    px, py = np.linspace(0, 1, 1000), []  # for plotting ## px: ndarray(1000,)
+    ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))  ## ap: ndarray(nc, niou), p: ndarray(nc, 1000), r: ndarray(nc, 1000)
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
         n_l = nt[ci]  # number of labels
@@ -376,16 +670,16 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=Path(), na
             continue
 
         # Accumulate FPs and TPs
-        fpc = (1 - tp[i]).cumsum(0)
-        tpc = tp[i].cumsum(0)
+        fpc = (1 - tp[i]).cumsum(0)  ## ndarray(npr, niou)
+        tpc = tp[i].cumsum(0)  ## ndarray(npr, niou)
 
         # Recall
-        recall = tpc / (n_l + eps)  # recall curve
-        r[ci] = np.interp(-px, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases
+        recall = tpc / (n_l + eps)  # recall curve ## ndarray(npr, niou)
+        r[ci] = np.interp(-px, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases ## recall points at 1st iou level
 
         # Precision
-        precision = tpc / (tpc + fpc)  # precision curve
-        p[ci] = np.interp(-px, -conf[i], precision[:, 0], left=1)  # p at pr_score
+        precision = tpc / (tpc + fpc)  # precision curve ## ndarray(npr, niou)
+        p[ci] = np.interp(-px, -conf[i], precision[:, 0], left=1)  # p at pr_score ## precision points at 1st iou level
 
         # AP from recall-precision curve
         for j in range(tp.shape[1]):
@@ -394,7 +688,7 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=Path(), na
                 py.append(np.interp(px, mrec, mpre))  # precision at mAP@0.5
 
     # Compute F1 (harmonic mean of precision and recall)
-    f1 = 2 * p * r / (p + r + eps)
+    f1 = 2 * p * r / (p + r + eps)  ## ndarray(nc, 1000)
     names = [v for k, v in names.items() if k in unique_classes]  # list: only classes that have data
     names = dict(enumerate(names))  # to dict
     if plot:
@@ -404,9 +698,9 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=Path(), na
         plot_mc_curve(px, r, save_dir / f'{prefix}R_curve.png', names, ylabel='Recall')
 
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
-    p, r, f1 = p[:, i], r[:, i], f1[:, i]
-    tp = (r * nt).round()  # true positives
-    fp = (tp / (p + eps) - tp).round()  # false positives
+    p, r, f1 = p[:, i], r[:, i], f1[:, i]  ## p,r,f1 is ndarray(nc,) at the sumit of f1 mean
+    tp = (r * nt).round()  # true positives ## ndarray(nc,)
+    fp = (tp / (p + eps) - tp).round()  # false positives ## ndarray(nc,)
     return tp, fp, p, r, f1, ap, unique_classes.astype(int)
 
 

@@ -31,7 +31,7 @@ class DetectionPredictor(BasePredictor):
         for i, pred in enumerate(preds):
             orig_img = orig_img[i] if isinstance(orig_img, list) else orig_img
             shape = orig_img.shape
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], shape).round()
+            pred[:, :8] = ops.scale_boxes(img.shape[2:], pred[:, :9], shape)[:, :8].round()
             path, _, _, _, _ = self.batch
             img_path = path[i] if isinstance(path, list) else path
             results.append(Results(orig_img=orig_img, path=img_path, names=self.model.names, boxes=pred))
@@ -65,17 +65,17 @@ class DetectionPredictor(BasePredictor):
         for d in reversed(det):
             cls, conf = d.cls.squeeze(), d.conf.squeeze()
             if self.args.save_txt:  # Write to file
-                line = (cls, *(d.xywhn.view(-1).tolist()), conf) \
-                    if self.args.save_conf else (cls, *(d.xywhn.view(-1).tolist()))  # label format
+                line = (cls, *(d.xyxyxyxyan.view(-1).tolist()), conf) \
+                    if self.args.save_conf else (cls, *(d.xyxyxyxyan.view(-1).tolist()))  # label format
                 with open(f'{self.txt_path}.txt', 'a') as f:
                     f.write(('%g ' * len(line)).rstrip() % line + '\n')
             if self.args.save or self.args.save_crop or self.args.show:  # Add bbox to image
                 c = int(cls)  # integer class
                 name = f'id:{int(d.id.item())} {self.model.names[c]}' if d.id is not None else self.model.names[c]
                 label = None if self.args.hide_labels else (name if self.args.hide_conf else f'{name} {conf:.2f}')
-                self.annotator.box_label(d.xyxy.squeeze(), label, color=colors(c, True))
+                self.annotator.box_label(d.xyxyxyxya.squeeze(), label, color=colors(c, True))
             if self.args.save_crop:
-                save_one_box(d.xyxy,
+                save_one_box(d.xyxyxyxya,
                              imc,
                              file=self.save_dir / 'crops' / self.model.model.names[c] / f'{self.data_path.stem}.jpg',
                              BGR=True)

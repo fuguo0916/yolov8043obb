@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 """
 Train a model on a dataset
 
@@ -91,6 +92,13 @@ class BaseTrainer:
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
+        r"""FG
+        project: e.g. "runs\detect"
+        name: e.g. "train"
+        save_dir: "runs\detect\train" as default
+        wdir: "runs\detect\train\weights"
+        save_period: -1 in yaml
+        """
         project = self.args.project or Path(SETTINGS['runs_dir']) / self.args.task
         name = self.args.name or f'{self.args.mode}'
         if hasattr(self.args, 'save_dir'):
@@ -113,7 +121,8 @@ class BaseTrainer:
             print_args(vars(self.args))
 
         # Device
-        self.amp = self.device.type != 'cpu'
+        # self.amp = self.device.type != 'cpu'
+        self.amp = False  ## FG. for debug
         self.scaler = amp.GradScaler(enabled=self.amp)
         if self.device.type == 'cpu':
             self.args.workers = 0  # faster CPU training as time dominated by inference, not dataloading
@@ -130,7 +139,7 @@ class BaseTrainer:
         except Exception as e:
             raise FileNotFoundError(emojis(f"Dataset '{self.args.data}' error ❌ {e}")) from e
 
-        self.trainset, self.testset = self.get_dataset(self.data)
+        self.trainset, self.testset = self.get_dataset(self.data)  # just get file paths
         self.ema = None
 
         # Optimization utils init
@@ -168,7 +177,14 @@ class BaseTrainer:
             callback(self)
 
     def train(self):
+        # FG. Add code below for debug
+        # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
         # Allow device='', device=None on Multi-GPU systems to default to device=0
+        """FG
+        No device provided in yaml, so self.args.device is None.
+        While self.device is cuda:0
+        The world_size here will be 1
+        """
         if isinstance(self.args.device, int) or self.args.device:  # i.e. device=0 or device=[0,1,2,3]
             world_size = torch.cuda.device_count()
         elif torch.cuda.is_available():  # i.e. device=None or device=''
@@ -189,6 +205,7 @@ class BaseTrainer:
             self._do_train(RANK, world_size)
 
     def _setup_ddp(self, rank, world_size):
+        assert False
         # os.environ['MASTER_ADDR'] = 'localhost'
         # os.environ['MASTER_PORT'] = '9020'
         torch.cuda.set_device(rank)
@@ -209,7 +226,7 @@ class BaseTrainer:
             self.model = DDP(self.model, device_ids=[rank])
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, 'stride') else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)  ## ensure imgsz in config is multiple of gs
         # Batch size
         if self.batch_size == -1:
             if RANK == -1:  # single-GPU only, estimate best batch size
@@ -241,6 +258,7 @@ class BaseTrainer:
             self.test_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode='val')
             self.validator = self.get_validator()
             metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix='val')
+            ## ['metrics/precision(B)', 'metrics/recall(B)', 'metrics/mAP50(B)', 'metrics/mAP50-95(B)', 'val/box_loss', 'val/cls_loss', 'val/dfl_loss']
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))  # TODO: init metrics for plot_results()?
             self.ema = ModelEMA(self.model)
             if self.args.plots:
@@ -305,9 +323,9 @@ class BaseTrainer:
 
                 # Forward
                 with torch.cuda.amp.autocast(self.amp):
-                    batch = self.preprocess_batch(batch)
-                    preds = self.model(batch['img'])
-                    self.loss, self.loss_items = self.criterion(preds, batch)
+                    batch = self.preprocess_batch(batch)  ## change batch["img"] normalized, and set batch to device
+                    preds = self.model(batch['img'])  ## (list: 3): (bs, no, h1, w1), (bs, no, h2, w2), (bs, no, h3, w3)
+                    self.loss, self.loss_items = self.criterion(preds, batch)  ## loss*bs, loss(box,cls,dfl)
                     if rank != -1:
                         self.loss *= world_size
                     self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
@@ -319,6 +337,7 @@ class BaseTrainer:
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
                     self.optimizer_step()
+                    # print(f"Debug: optimizer stepped once.")
                     last_opt_step = ni
 
                 # Log
@@ -338,6 +357,7 @@ class BaseTrainer:
             self.lr = {f'lr/pg{ir}': x['lr'] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
 
             self.scheduler.step()
+            # print(f"Debug: scheduler stepped once.")
             self.run_callbacks('on_train_epoch_end')
 
             if rank in {-1, 0}:

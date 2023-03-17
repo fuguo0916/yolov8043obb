@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import contextlib
 import hashlib
@@ -82,7 +83,7 @@ def verify_image_label(args):
             nf = 1  # label found
             with open(lb_file) as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
+                if any(len(x) > 10 for x in lb) and (not keypoint):  # is segment
                     classes = np.array([x[0] for x in lb], dtype=np.float32)
                     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
                     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
@@ -100,15 +101,16 @@ def verify_image_label(args):
                     lb = kpts
                     assert lb.shape[1] == 39, 'labels require 39 columns each after removing occlusion parameter'
                 else:
-                    assert lb.shape[1] == 5, f'labels require 5 columns, {lb.shape[1]} columns detected'
-                    assert (lb[:, 1:] <= 1).all(), \
-                        f'non-normalized or out of bounds coordinates {lb[:, 1:][lb[:, 1:] > 1]}'
+                    assert lb.shape[1] == 10, f'labels require 10 columns, {lb.shape[1]} columns detected'
+                    assert (lb[:, 1:9] <= 1.5).all(), \
+                        f'non-normalized or out of bounds coordinates {lb[:, 1:10][lb[:, 1:10] > 1]}'
+                    assert (lb[:, 9] > -1.6).all() and (lb[:, 9] < 1.6).all(), f"wrong format of angle in labels"
                 # All labels
                 max_cls = int(lb[:, 0].max())  # max label count
                 assert max_cls <= num_cls, \
                     f'Label class {max_cls} exceeds dataset class count {num_cls}. ' \
                     f'Possible class labels are 0-{num_cls - 1}'
-                assert (lb >= 0).all(), f'negative label values {lb[lb < 0]}'
+                # assert (lb >= 0).all(), f'negative label values {lb[lb < 0]}'
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:  # duplicate row check
                     lb = lb[i]  # remove duplicates
@@ -117,13 +119,14 @@ def verify_image_label(args):
                     msg = f'{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed'
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0, 39), dtype=np.float32) if keypoint else np.zeros((0, 5), dtype=np.float32)
+                lb = np.zeros((0, 39), dtype=np.float32) if keypoint else np.zeros((0, 10), dtype=np.float32)
         else:
+            assert False
             nm = 1  # label missing
-            lb = np.zeros((0, 39), dtype=np.float32) if keypoint else np.zeros((0, 5), dtype=np.float32)
+            lb = np.zeros((0, 39), dtype=np.float32) if keypoint else np.zeros((0, 10), dtype=np.float32)
         if keypoint:
             keypoints = lb[:, 5:].reshape(-1, 17, 2)
-        lb = lb[:, :5]
+        lb = lb[:, :10]
         return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1

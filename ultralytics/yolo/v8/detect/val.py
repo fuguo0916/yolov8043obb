@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import os
 from pathlib import Path
@@ -11,7 +12,8 @@ from ultralytics.yolo.data.dataloaders.v5loader import create_dataloader
 from ultralytics.yolo.engine.validator import BaseValidator
 from ultralytics.yolo.utils import DEFAULT_CFG, colorstr, ops
 from ultralytics.yolo.utils.checks import check_requirements
-from ultralytics.yolo.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
+from ultralytics.yolo.utils.metrics import ConfusionMatrix, DetMetrics, box_iou, obb_iou_plain, obb_iou_for_metrics
+from ultralytics.yolo.utils.ops import xywha2xyxyxyxya
 from ultralytics.yolo.utils.plotting import output_to_target, plot_images
 from ultralytics.yolo.utils.torch_utils import de_parallel
 
@@ -67,14 +69,28 @@ class DetectionValidator(BaseValidator):
         return preds
 
     def update_metrics(self, preds, batch):
+        """FG
+        Args:
+            preds: (list: bs) of Tensor(npr, 11) Pixel-PolyTheta + conf + pred_label
+            batch: {
+                im_file: (list: bs) of image paths
+                ori_shape: (list: bs) of original shapes
+                resized_shape: (list: bs) of resized shapes
+                retio_pad: (list: bs)
+                img: Tensor(bs, c, h, w) Normalized
+                cls: Tensor(nt, 1)
+                bboxes: Tensor(nt, 9) Norm-PolyTheta
+                batch_idx: Tensor(nt,), batch indices for targets
+            }
+        """
         # Metrics
         for si, pred in enumerate(preds):
             idx = batch['batch_idx'] == si
-            cls = batch['cls'][idx]
-            bbox = batch['bboxes'][idx]
+            cls = batch['cls'][idx]  ## Tensor(nl,1), nl: number of labels of image[si]
+            bbox = batch['bboxes'][idx]  ## Tensor(nl,9)
             nl, npr = cls.shape[0], pred.shape[0]  # number of labels, predictions
-            shape = batch['ori_shape'][si]
-            correct_bboxes = torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device)  # init
+            shape = batch['ori_shape'][si]  ## original [h, w]
+            correct_bboxes = torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device)  # init ## Tensor(npr, niou)
             self.seen += 1
 
             if npr == 0:
@@ -86,24 +102,32 @@ class DetectionValidator(BaseValidator):
 
             # Predictions
             if self.args.single_cls:
-                pred[:, 5] = 0
+                pred[:, 10] = 0
+
             predn = pred.clone()
-            ops.scale_boxes(batch['img'][si].shape[1:], predn[:, :4], shape,
-                            ratio_pad=batch['ratio_pad'][si])  # native-space pred
+            predn[:, :9] = ops.scale_boxes(batch['img'][si].shape[1:], predn[:, :9], shape,
+                                   ratio_pad=batch['ratio_pad'][si])  # native-space pred
+            # mask = ops.clip_obb(predn[:, :9], shape)
+            # predn = predn[mask]
+            ## predn: Tensor(npr, 11) [Pixel-Poly, conf, cls]
 
             # Evaluate
             if nl:
                 height, width = batch['img'].shape[2:]
-                tbox = ops.xywh2xyxy(bbox) * torch.tensor(
-                    (width, height, width, height), device=self.device)  # target boxes
-                ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
+                # bbox is Norm-PolyTheta.
+                tbox = bbox * torch.tensor(
+                    (width, height, width, height, width, height, width, height, 1), device=self.device)  # target boxes
+                # tbox: Tensor(nl, 9) Pixel-Poly
+                tbox = ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
                                 ratio_pad=batch['ratio_pad'][si])  # native-space labels
-                labelsn = torch.cat((cls, tbox), 1)  # native-space labels
-                correct_bboxes = self._process_batch(predn, labelsn)
+                # mask = ops.clip_obb(tbox, shape)
+                # tbox = tbox[mask]  ## tbox: Tensor(nl, 9) Pixel-Poly
+                labelsn = torch.cat((cls, tbox), 1)  # native-space labels  ## Tensor(nl, 10) label + Pixel-Poly
+                correct_bboxes = self._process_batch(predn, labelsn)  ## Tensor(npr, niou) T/F
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
-            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1)))  # (conf, pcls, tcls)
+            self.stats.append((correct_bboxes, pred[:, 9], pred[:, 10], cls.squeeze(-1)))  ## tuple of Tensor(npr,niou) T/F, Tensor(npr,9) Pixel-Poly, Tensor(npr,) conf, Tensor(nl,) target label
 
             # Save
             if self.args.save_json:
@@ -115,10 +139,10 @@ class DetectionValidator(BaseValidator):
         self.metrics.speed = dict(zip(self.metrics.speed.keys(), self.speed))
 
     def get_stats(self):
-        stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*self.stats)]  # to numpy
+        stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*self.stats)]  # to numpy ## [ndarray(t_npr,niou) T/F, ndarray(t_npr,) conf, ndarray(t_npr,) pcls, ndarray(t_nl,) tcls]
         if len(stats) and stats[0].any():
             self.metrics.process(*stats)
-        self.nt_per_class = np.bincount(stats[-1].astype(int), minlength=self.nc)  # number of targets per class
+        self.nt_per_class = np.bincount(stats[-1].astype(int), minlength=self.nc)  # number of targets per class ndarray(nc,)
         return self.metrics.results_dict
 
     def print_results(self):
@@ -137,27 +161,29 @@ class DetectionValidator(BaseValidator):
             self.confusion_matrix.plot(save_dir=self.save_dir, names=list(self.names.values()))
 
     def _process_batch(self, detections, labels):
-        """
+        """FG
+        Only called in `update_metrics`.
         Return correct prediction matrix
         Arguments:
-            detections (array[N, 6]), x1, y1, x2, y2, conf, class
-            labels (array[M, 5]), class, x1, y1, x2, y2
+            detections (array[npr, 11]), Pixel-Poly box, conf, class
+            labels (array[nl, 10]), class, Pixel-Poly box
         Returns:
-            correct (array[N, 10]), for 10 IoU levels
+            correct (array[npr, 10]), for 10 IoU levels
         """
-        iou = box_iou(labels[:, 1:], detections[:, :4])
-        correct = np.zeros((detections.shape[0], self.iouv.shape[0])).astype(bool)
-        correct_class = labels[:, 0:1] == detections[:, 5]
+        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9])  # box_iou ## Tensor(nl, npr)
+        correct = np.zeros((detections.shape[0], self.iouv.shape[0])).astype(bool)  ## Tensor(npr, niou)
+        correct_class = labels[:, 0:1] == detections[:, 10]  # mask, Tensor(nl, npr)
         for i in range(len(self.iouv)):
             x = torch.where((iou >= self.iouv[i]) & correct_class)  # IoU > threshold and classes match
+            ## x: (tuple: 2) of Tensor(n_matched,)
             if x[0].shape[0]:
                 matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]),
-                                    1).cpu().numpy()  # [label, detect, iou]
+                                    1).cpu().numpy()  # [label, detect, iou] ## Tensor(n_matched, 3)
                 if x[0].shape[0] > 1:
-                    matches = matches[matches[:, 2].argsort()[::-1]]
-                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                    matches = matches[matches[:, 2].argsort()[::-1]]  ## sort reversely by iou
+                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]  ## <= 1 per pred
                     # matches = matches[matches[:, 2].argsort()[::-1]]
-                    matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+                    matches = matches[np.unique(matches[:, 0], return_index=True)[1]]  ## <= 1 per label
                 correct[matches[:, 1].astype(int), i] = True
         return torch.tensor(correct, dtype=torch.bool, device=detections.device)
 
@@ -197,6 +223,7 @@ class DetectionValidator(BaseValidator):
                     names=self.names)  # pred
 
     def pred_to_json(self, predn, filename):
+        assert False
         stem = Path(filename).stem
         image_id = int(stem) if stem.isnumeric() else stem
         box = ops.xyxy2xywh(predn[:, :4])  # xywh

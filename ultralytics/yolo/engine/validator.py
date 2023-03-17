@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 """
 Check a model's accuracy on a test or val split of a dataset
 
@@ -108,6 +109,7 @@ class BaseValidator:
             self.args.plots = trainer.epoch == trainer.epochs - 1  # always plot final epoch
             model.eval()
         else:
+            # assert False
             callbacks.add_integration_callbacks(self)
             self.run_callbacks('on_val_start')
             assert model is not None, 'Either trainer or model is needed for validation'
@@ -136,7 +138,9 @@ class BaseValidator:
                 self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading
             if not pt:
                 self.args.rect = False
-            self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
+            # self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
+            # TODO: FG. For val
+            self.dataloader = self.dataloader or self.get_dataloader(self.data.get("val"), self.args.batch)  ## "train", "test"
 
             model.eval()
             model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
@@ -156,10 +160,28 @@ class BaseValidator:
             # preprocess
             with dt[0]:
                 batch = self.preprocess(batch)
+                """FG
+                Format of batch {
+                    im_file: (list: bs) of image paths
+                    ori_shape: (list: bs) of original shapes
+                    resized_shape: (list: bs) of resized shapes
+                    img: Tensor(bs, c, h, w) Normalized
+                    cls: Tensor(nt, 1)
+                    bboxes: Tensor(nt, 9) Norm-PolyTheta
+                    batch_idx: Tensor(nt,), batch indices for targets
+                }
+                bs: batch size
+                nt: number of targets in entire batch
+                """
 
             # inference
             with dt[1]:
                 preds = model(batch['img'])
+                """FG
+                (y,x)
+                y: Tensor(bs,9+nc,na) Pixel-PolyTheta box + scores 0-1
+                x: [Tensor(bs,no,h1,w1), Tensor(bs,no,h2,w2), Tensor(bs,no,h3,w3)]
+                """
 
             # loss
             with dt[2]:
@@ -169,6 +191,7 @@ class BaseValidator:
             # postprocess
             with dt[3]:
                 preds = self.postprocess(preds)
+                """FG. preds: Tensor(bs, na", 11) Pixel-PolyTheta + conf + pred_label"""
 
             self.update_metrics(preds, batch)
             if self.args.plots and batch_i < 3:
@@ -176,7 +199,7 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks('on_val_batch_end')
-        stats = self.get_stats()
+        stats = self.get_stats()  # (list: n_val) of [Tensor(npr,niou) T/F, conf, pcls, tcls]
         self.check_stats(stats)
         self.print_results()
         self.speed = tuple(x.t / len(self.dataloader.dataset) * 1E3 for x in dt)  # speeds per image

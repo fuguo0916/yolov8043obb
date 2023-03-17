@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import glob
 import math
@@ -45,12 +46,16 @@ class BaseDataset(Dataset):
         self.single_cls = single_cls
         self.prefix = prefix
 
-        self.im_files = self.get_img_files(self.img_path)
+        self.im_files = self.get_img_files(self.img_path)  ## a list of image paths
         self.labels = self.get_labels()
+        for index, label in enumerate(self.labels):
+            if (label["bboxes"] > 2).any():
+                assert False, f"get_label_info index {index}"
         if self.single_cls:
+            assert False
             self.update_labels(include_class=[])
 
-        self.ni = len(self.labels)
+        self.ni = len(self.labels)  ## number of images
 
         # rect stuff
         self.rect = rect
@@ -152,6 +157,12 @@ class BaseDataset(Dataset):
             np.save(f.as_posix(), cv2.imread(self.im_files[i]))
 
     def set_rectangle(self):
+        """FG
+        It's called in initializing the dataset if rect is True.
+        It sorts the im_files and labels by aspect ratio.
+        And it saves self.bi (ni,) as batch indices of images
+                     self.batch_shapes (number of batches,) for batches
+        """
         bi = np.floor(np.arange(self.ni) / self.batch_size).astype(int)  # batch index
         nb = bi[-1] + 1  # number of batches
 
@@ -176,10 +187,33 @@ class BaseDataset(Dataset):
         self.batch = bi  # batch index of image
 
     def __getitem__(self, index):
-        return self.transforms(self.get_label_info(index))
+        result = self.transforms(self.get_label_info(index))
+        return result
 
     def get_label_info(self, index):
+        """FG
+        Return the label at index.
+        The label has:
+            img (ndarray): resized pixel HWC,
+            ori_shape (tuple: 2),
+            resized_shape (tuple: 2),
+            ratio_pad (tuple: 2),
+            rect_shape (tuple: 2) if rect,
+            ---------------------------------
+            cls: ndarray(n,1),
+            im_file: img_path,
+            instances:{
+                bboxes: ndarray (n,9) Norm-PolyTheta,   _bboxes.bboxes / _bboxes.format
+                normalized: True/False
+                keypoints: None,
+                segments: ndarray (0,1000,2)
+            }
+        It only returns the label, without changing labels in Dataset
+        """
         label = self.labels[index].copy()
+        label["bboxes"] = self.labels[index]["bboxes"].copy()
+        if (label["bboxes"] > 2).any():
+            assert False, f"get_label_info index {index}"
         label.pop('shape', None)  # shape is for rect, remove it
         label['img'], label['ori_shape'], label['resized_shape'] = self.load_image(index)
         label['ratio_pad'] = (

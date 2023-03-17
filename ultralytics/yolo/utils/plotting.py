@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import contextlib
 import math
@@ -18,7 +19,7 @@ from ultralytics.yolo.utils import LOGGER, TryExcept, threaded
 
 from .checks import check_font, check_version, is_ascii
 from .files import increment_path
-from .ops import clip_coords, scale_image, xywh2xyxy, xyxy2xywh
+from .ops import clip_coords, scale_image, xywh2xyxy, xyxy2xywh, xywha2xyxyxyxya, xyxyxyxya2xywha
 
 matplotlib.rc('font', **{'size': 11})
 matplotlib.use('Agg')  # for writing to files only
@@ -50,7 +51,7 @@ class Annotator:
     def __init__(self, im, line_width=None, font_size=None, font='Arial.ttf', pil=False, example='abc'):
         assert im.data.contiguous, 'Image not contiguous. Apply np.ascontiguousarray(im) to Annotator() input images.'
         non_ascii = not is_ascii(example)  # non-latin labels, i.e. asian, arabic, cyrillic
-        self.pil = pil or non_ascii
+        self.pil = pil or non_ascii or True  ## Always PIL
         if self.pil:  # use PIL
             self.pil_9_2_0_check = check_version(pil_version, '9.2.0')  # deprecation check
             self.im = im if isinstance(im, Image.Image) else Image.fromarray(im)
@@ -70,7 +71,8 @@ class Annotator:
         if isinstance(box, torch.Tensor):
             box = box.tolist()
         if self.pil or not is_ascii(label):
-            self.draw.rectangle(box, width=self.lw, outline=color)  # box
+            vertices = [(box[0], box[1]), (box[2], box[3]), (box[4], box[5]), (box[6], box[7])]
+            self.draw.polygon(vertices, width=self.lw, outline=color)  # box
             if label:
                 if self.pil_9_2_0_check:
                     _, _, w, h = self.font.getbbox(label)  # text width, height (New)
@@ -85,9 +87,13 @@ class Annotator:
                 # self.draw.text((box[0], box[1]), label, fill=txt_color, font=self.font, anchor='ls')  # for PIL>8.0
                 self.draw.text((box[0], box[1] - h if outside else box[1]), label, fill=txt_color, font=self.font)
         else:  # cv2
-            p1, p2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
-            cv2.rectangle(self.im, p1, p2, color, thickness=self.lw, lineType=cv2.LINE_AA)
+            vertices = np.asarray([[box[0], box[1]], [box[2], box[3]], [box[4], box[5]], [box[6], box[7]]])
+            vertices = vertices.reshape((-1, 1, 2))
+            cv2.polylines(self.im, [vertices,], isClosed=True, thickness=self.lw, color=color, lineType=cv2.LINE_AA)  # box
+            # p1, p2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
+            # cv2.rectangle(self.im, p1, p2, color, thickness=self.lw, lineType=cv2.LINE_AA)
             if label:
+                p1, p2 = int(box[0]), int(box[1])
                 tf = max(self.lw - 1, 1)  # font thickness
                 w, h = cv2.getTextSize(label, 0, fontScale=self.lw / 3, thickness=tf)[0]  # text width, height
                 outside = p1[1] - h >= 3
@@ -159,9 +165,10 @@ class Annotator:
 
 @TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395
 def plot_labels(boxes, cls, names=(), save_dir=Path('')):
+    # TODO: FG. To be refined. This function is called before training to see features of labels.
     # plot dataset labels
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
-    b = boxes.transpose()  # classes, boxes
+    b = boxes.transpose()[:4]  # classes, boxes
     nc = int(cls.max() + 1)  # number of classes
     x = pd.DataFrame(b.transpose(), columns=['x', 'y', 'width', 'height'])
 
@@ -245,6 +252,14 @@ def plot_images(images,
     max_size = 1920  # max image size
     max_subplots = 16  # max image subplots, i.e. 4x4
     bs, _, h, w = images.shape  # batch size, _, height, width
+    # if bboxes.max() < 2.01:
+    #     if bboxes.shape[-1] == 9 or bboxes.shape[-1] == 10:
+    #         new_bboxes = xywha2xyxyxyxya(bboxes[:, :5])
+    #         new_bboxes[:, [0, 2, 4, 6]] *= w
+    #         new_bboxes[:, [1, 3, 5, 7]] *= h
+    #         bboxes[:, :5] = xyxyxyxya2xywha(new_bboxes)
+    #     else:
+    #         assert False
     bs = min(bs, max_subplots)  # limit plot images
     ns = np.ceil(bs ** 0.5)  # number of subplots (square)
     if np.max(images[0]) <= 1:
@@ -277,19 +292,19 @@ def plot_images(images,
         if len(cls) > 0:
             idx = batch_idx == i
 
-            boxes = xywh2xyxy(bboxes[idx, :4]).T
+            boxes = bboxes[idx, :9].T
             classes = cls[idx].astype('int')
-            labels = bboxes.shape[1] == 4  # labels if no conf column
-            conf = None if labels else bboxes[idx, 4]  # check for confidence presence (label vs pred)
+            labels = bboxes.shape[1] == 9  # labels if no conf column
+            conf = None if labels else bboxes[idx, 9]  # check for confidence presence (label vs pred)
 
             if boxes.shape[1]:
-                if boxes.max() <= 1.01:  # if normalized with tolerance 0.01
-                    boxes[[0, 2]] *= w  # scale to pixels
-                    boxes[[1, 3]] *= h
+                if boxes.max() <= 2.01:  # if normalized with tolerance 0.01
+                    boxes[[0, 2, 4, 6]] *= w  # scale to pixels
+                    boxes[[1, 3, 5, 7]] *= h
                 elif scale < 1:  # absolute coords need scale if image scales
-                    boxes *= scale
-            boxes[[0, 2]] += x
-            boxes[[1, 3]] += y
+                    boxes[:8] *= scale
+            boxes[[0, 2, 4, 6]] += x
+            boxes[[1, 3, 5, 7]] += y
             for j, box in enumerate(boxes.T.tolist()):
                 c = classes[j]
                 color = colors(c)
@@ -361,8 +376,8 @@ def output_to_target(output, max_det=300):
     # Convert model output to target format [batch_id, class_id, x, y, w, h, conf] for plotting
     targets = []
     for i, o in enumerate(output):
-        box, conf, cls = o[:max_det, :6].cpu().split((4, 1, 1), 1)
+        box, conf, cls = o[:max_det, :11].cpu().split((9, 1, 1), 1)  ## box: Tensor(na",9) Pixel-PolyTheta
         j = torch.full((conf.shape[0], 1), i)
-        targets.append(torch.cat((j, cls, xyxy2xywh(box), conf), 1))
+        targets.append(torch.cat((j, cls, box, conf), 1))
     targets = torch.cat(targets, 0).numpy()
     return targets[:, 0], targets[:, 1], targets[:, 2:]

@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
@@ -47,6 +48,12 @@ class YOLODataset(BaseDataset):
         # Cache dataset labels, check images and read shapes
         x = {'labels': []}
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
+        """FG
+        nf: ++ if one image and its label file is found
+        ne: ++ if one image and its label file is found, and no label in label file
+        nm: ++ if one image is found, but its label file isn't found
+        nc: ++ if other exceptions occur
+        """
         desc = f'{self.prefix}Scanning {path.parent / path.stem}...'
         total = len(self.im_files)
         with ThreadPool(NUM_THREADS) as pool:
@@ -55,6 +62,9 @@ class YOLODataset(BaseDataset):
                                              repeat(self.use_keypoints), repeat(len(self.names))))
             pbar = tqdm(results, desc=desc, total=total, bar_format=TQDM_BAR_FORMAT)
             for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            ## e.g.
+            ## im_file: 'mydata\\images\\100001627.bmp', lb: (4,6), shape: (201,283) (pixel_h, pixel_w), segments: [], keypoint: None
+            ## nm_f=0, nf_f=1, ne_f=0, nc_f=0
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -65,11 +75,11 @@ class YOLODataset(BaseDataset):
                             im_file=im_file,
                             shape=shape,
                             cls=lb[:, 0:1],  # n, 1
-                            bboxes=lb[:, 1:],  # n, 4
+                            bboxes=lb[:, 1:],  # n, 9
                             segments=segments,
                             keypoints=keypoint,
                             normalized=True,
-                            bbox_format='xywh'))
+                            bbox_format='poly_theta'))
                 if msg:
                     msgs.append(msg)
                 pbar.desc = f'{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt'
@@ -94,14 +104,29 @@ class YOLODataset(BaseDataset):
         return x
 
     def get_labels(self):
+        """FG
+        It not only returns labels, but also filters self.im_files.
+
+        Format of a label: {
+            im_file: "image_path",
+            shape: original (pixel_h, pixel_w),
+            cls: ndarray (n,1),
+            bboxes: ndarray (n,9),
+            segment: [],
+            keypoints: None,
+            normalized: True/False,
+            bbox_format: "poly_theta"
+        }
+        """
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix('.cache')
-        try:
-            cache, exists = np.load(str(cache_path), allow_pickle=True).item(), True  # load dict
-            assert cache['version'] == self.cache_version  # matches current version
-            assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
-        except (FileNotFoundError, AssertionError, AttributeError):
-            cache, exists = self.cache_labels(cache_path), False  # run cache ops
+        # try:
+        #     cache, exists = np.load(str(cache_path), allow_pickle=True).item(), True  # load dict
+        #     assert cache['version'] == self.cache_version  # matches current version
+        #     assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
+        # except (FileNotFoundError, AssertionError, AttributeError):
+        #     cache, exists = self.cache_labels(cache_path), False  # run cache ops
+        cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupt, total
@@ -135,6 +160,28 @@ class YOLODataset(BaseDataset):
 
     # TODO: use hyp config to set all these augmentations
     def build_transforms(self, hyp=None):
+        """FG
+        if augment True:
+        Compose{
+            Compose{
+                Mosaic,
+                CopyPaste,
+                RandomPerspective(pre=LetterBox)
+            },
+            MixUp,
+            Albumentations,
+            RandomHSV,
+            RandomFlip(vertical),
+            RandomFlip(horizontal),
+            Format,
+        }
+
+        If augment False:
+        Compose{
+            LetterBox (scaleup False),
+            Format
+        }
+        """
         if self.augment:
             hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
             hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
@@ -142,7 +189,7 @@ class YOLODataset(BaseDataset):
         else:
             transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
         transforms.append(
-            Format(bbox_format='xywh',
+            Format(bbox_format='poly_theta',
                    normalize=True,
                    return_mask=self.use_segments,
                    return_keypoint=self.use_keypoints,
@@ -171,6 +218,19 @@ class YOLODataset(BaseDataset):
 
     @staticmethod
     def collate_fn(batch):
+        """FG
+        Format of new_batch {
+            im_file: (tuple: bs) of image paths
+            ori_shape: (tuple: bs) of original shapes
+            resized_shape: (tuple: bs) of resized shapes
+            img: Tensor(bs, c, h, w) absolute
+            cls: Tensor(nt, 1)
+            bboxes: Tensor(nt, 9) Norm-PolyTheta
+            batch_idx: Tensor(nt,), batch indices for targets
+        }
+        bs: batch size
+        nt: number of targets in entire batch
+        """
         new_batch = {}
         keys = batch[0].keys()
         values = list(zip(*[list(b.values()) for b in batch]))
