@@ -1,3 +1,5 @@
+# Checked by FG 20230310
+
 import contextlib
 import math
 import re
@@ -10,8 +12,9 @@ import torch.nn.functional as F
 import torchvision
 
 from ultralytics.yolo.utils import LOGGER
+from ultralytics.yolo.utils.nms_rotated import obb_nms
 
-from .metrics import box_iou
+from .metrics import box_iou, get_enclosing_hbb, obb_iou_plain, obb_iou_for_metrics
 
 
 class Profile(contextlib.ContextDecorator):
@@ -86,12 +89,12 @@ def segment2box(segment, width=640, height=640):
 
 def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
     """
-    Rescales bounding boxes (in the format of xyxy) from the shape of the image they were originally specified in
+    Rescales bounding boxes (in the format of Pixel-PolyTheta) from the shape of the image they were originally specified in
     (img1_shape) to the shape of a different image (img0_shape).
 
     Args:
       img1_shape (tuple): The shape of the image that the bounding boxes are for, in the format of (height, width).
-      boxes (torch.Tensor): the bounding boxes of the objects in the image, in the format of (x1, y1, x2, y2)
+      boxes (torch.Tensor): the bounding boxes of the objects in the image, in Pixel-PolyTheta format
       img0_shape (tuple): the shape of the target image, in the format of (height, width).
       ratio_pad (tuple): a tuple of (ratio, pad) for scaling the boxes. If not provided, the ratio and pad will be
                          calculated based on the size difference between the two images.
@@ -99,6 +102,7 @@ def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
     Returns:
       boxes (torch.Tensor): The scaled bounding boxes, in the format of (x1, y1, x2, y2)
     """
+    assert boxes.shape[-1] == 9
     if ratio_pad is None:  # calculate from img0_shape
         gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
         pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
@@ -106,10 +110,9 @@ def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
         gain = ratio_pad[0][0]
         pad = ratio_pad[1]
 
-    boxes[..., [0, 2]] -= pad[0]  # x padding
-    boxes[..., [1, 3]] -= pad[1]  # y padding
-    boxes[..., :4] /= gain
-    clip_boxes(boxes, img0_shape)
+    boxes[..., [0, 2, 4, 6]] -= pad[0]  # x padding
+    boxes[..., [1, 3, 5, 7]] -= pad[1]  # y padding
+    boxes[..., :8] /= gain
     return boxes
 
 
@@ -177,17 +180,17 @@ def non_max_suppression(
     assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
     assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
-        prediction = prediction[0]  # select only inference output
+        prediction = prediction[0]  # select only inference output ## Tensor(bs, 9+nc, na) Pixel-PolyTheta + scores 0-1
 
     device = prediction.device
     mps = 'mps' in device.type  # Apple MPS
     if mps:  # MPS not fully supported yet, convert tensors to CPU before NMS
         prediction = prediction.cpu()
     bs = prediction.shape[0]  # batch size
-    nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - 4
-    mi = 4 + nc  # mask start index
-    xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
+    nc = nc or (prediction.shape[1] - 9)  # number of classes
+    nm = prediction.shape[1] - nc - 9
+    mi = 9 + nc  # mask start index
+    xc = prediction[:, 9:mi].amax(1) > conf_thres  # candidates ## Tensor(bs, na) T/F if max score is over conf_thres
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -197,14 +200,15 @@ def non_max_suppression(
     merge = False  # use merge-NMS
 
     t = time.time()
-    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output = [torch.zeros((0, 11 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x.transpose(0, -1)[xc[xi]]  # confidence
+        x = x.transpose(0, -1)[xc[xi]]  # confidence ## Tensor(na', 9+nc), na' is number of na over conf threshold, Pixel-PolyTheta & scores
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]):
+            assert False
             lb = labels[xi]
             v = torch.zeros((len(lb), nc + nm + 5), device=x.device)
             v[:, :4] = lb[:, 1:5]  # box
@@ -215,19 +219,20 @@ def non_max_suppression(
         if not x.shape[0]:
             continue
 
-        # Detections matrix nx6 (xyxy, conf, cls)
-        box, cls, mask = x.split((4, nc, nm), 1)
-        box = xywh2xyxy(box)  # center_x, center_y, width, height) to (x1, y1, x2, y2)
+        # Detections matrix nx6 (poly_theta, conf, cls)
+        box, cls, mask = x.split((9, nc, nm), 1)
+        ## box: Tensor(na', 9) Pixel-PolyTheta; cls: Tensor(na', nc) 0-1; mask: Tensor(na', 0)
         if multi_label:
-            i, j = (cls > conf_thres).nonzero(as_tuple=False).T
-            x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+            i, j = (cls > conf_thres).nonzero(as_tuple=False).T  ## Tensor(ns,), nac is number of scores in (na*nc) over conf
+            x = torch.cat((box[i], x[i, 9 + j, None], j[:, None].float(), mask[i]), 1)  ## Tensor(ns,11) Pixel-PolyTheta, conf, pred_label
         else:  # best class only
-            conf, j = cls.max(1, keepdim=True)
-            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
+            conf, j = cls.max(1, keepdim=True)  ## both Tensor(na', 1)
+            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]  ## Tensor(na',11) Pixel-PolyTheta, conf, pred_label
 
         # Filter by class
         if classes is not None:
-            x = x[(x[:, 5:6] == torch.tensor(classes, device=x.device)).any(1)]
+            assert False
+            x = x[(x[:, 6:7] == torch.tensor(classes, device=x.device)).any(1)]
 
         # Apply finite constraint
         # if not torch.isfinite(x).all():
@@ -237,29 +242,43 @@ def non_max_suppression(
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
-        x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+        x = x[x[:, 9].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
 
         # Batched NMS
-        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-        boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
-        i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+        nms_choice = "riou"
+        if nms_choice == "miou":
+            hbb = get_enclosing_hbb(x[:, :9])
+            # c = x[:, 10:11] * (0 if agnostic else max_wh)  # classes
+            # hbb, scores = hbb[:, :4] + c, x[:, 9]  # boxes (offset by class, Pixel-Poly), scores
+            hbb, scores = hbb[:, :4], x[:, 9]  # boxes (offset by class, Pixel-Poly), scores
+            i = torchvision.ops.nms(hbb, scores, iou_thres)
+        else:
+            obb_xywha = xyxyxyxya2xywha(x[:, :9])
+            c = x[:, 10:11] * (0 if agnostic else max_wh)  # classes
+            # obb_xywha[:, :2] = obb_xywha[:, :2] + c
+            scores = x[:, 9]
+            _, i = obb_nms(obb_xywha, scores, iou_thres, device_id=None)
+
+
         i = i[:max_det]  # limit detections
         if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+            assert False
             # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
-            iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
+            iou = obb_iou_plain(boxes[i], boxes) > iou_thres  # iou matrix # box_iou
             weights = iou * scores[None]  # box weights
             x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
             if redundant:
                 i = i[iou.sum(1) > 1]  # require redundancy
 
-        output[xi] = x[i]
+        output[xi] = x[i]  ## (na", 11) Pixel-PolyTheta, conf, pred_label
         if mps:
             output[xi] = output[xi].to(device)
         if (time.time() - t) > time_limit:
             LOGGER.warning(f'WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded')
-            break  # time limit exceeded
+            ## TODO: to debug, do not break.
+            # break  # time limit exceeded
 
-    return output
+    return output  ## Tensor(bs, na", 11) Pixel-PolyTheta, conf, pred_label
 
 
 def clip_boxes(boxes, shape):
@@ -279,6 +298,27 @@ def clip_boxes(boxes, shape):
     else:  # np.array (faster grouped)
         boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
         boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
+
+
+def clip_obb(boxes, shape):
+    """FG
+    Args:
+        boxes: (torch.Tensor) a list of OBBs in Pixel-Poly format
+        shape: (tuple), (height, width) of the image
+
+    It rolls out those OBBs whose center exceeds the boundary donated by the shape and returns a valid mask.
+    It has similar usage to obb_filter.
+    """
+    assert boxes.shape[-1] == 9
+    h, w = shape
+    if isinstance(boxes, torch.Tensor):
+        assert len(boxes.shape) == 2
+        xy = incomplete_xyxyxy2xy(boxes)
+        a = torch.logical_and
+        mask = a(a(a((xy[..., 0] > 0), (xy[..., 0] < w)), (xy[..., 1] > 0)), (xy[..., 1] < h))
+        return mask
+    else:
+        assert False
 
 
 def clip_coords(boxes, shape):
@@ -437,6 +477,120 @@ def xyn2xy(x, w=640, h=640, padw=0, padh=0):
     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
     y[..., 0] = w * x[..., 0] + padw  # top left x
     y[..., 1] = h * x[..., 1] + padh  # top left y
+    return y
+
+
+def xywha2xyxyxyxya(x):
+    """FG
+    Args:
+        x: boxes, the last dim is 5
+    Return:
+        y with almost same shape
+    """
+    if isinstance(x, torch.Tensor):
+        assert x.shape[-1] == 5
+        y = x.clone()
+        y.resize_(list(x.shape[:-1]) + [9,])
+        cos_a = x[..., -1].cos()
+        sin_a = x[..., -1].sin()
+        xy, w, h, angle = x[..., 0:2], x[..., 2], x[..., 3], x[..., 4]
+        half_dw = torch.stack([w * cos_a / 2, w * sin_a / 2], dim=-1)
+        half_dh = torch.stack([-h * sin_a / 2, h * cos_a / 2], dim=-1)
+        y[..., 0:2] = xy - half_dw - half_dh
+        y[..., 2:4] = xy - half_dw + half_dh
+        y[..., 4:6] = xy + half_dw + half_dh
+        y[..., 6:8] = xy + half_dw - half_dh
+        y[..., 8] = angle
+        assert x.shape[:-1] == y.shape[:-1] and y.shape[-1] == 9
+        return y
+    else:
+        assert len(x.shape) == 2 and x.shape[-1] == 5
+        y = np.copy(x)
+        y.resize((x.shape[0], 9), refcheck=False)
+        cos_a = np.cos(x[:, -1])
+        sin_a = np.sin(x[:, -1])
+        xy, w, h, angle = x[:, 0:2], x[:, 2], x[:, 3], x[:, 4]
+        half_dw = np.stack((w * cos_a / 2, w * sin_a / 2), axis=1)
+        half_dh = np.stack((-h * sin_a / 2, h * cos_a / 2), axis=1)
+        y[:, 0:2] = xy - half_dw - half_dh
+        y[:, 2:4] = xy - half_dw + half_dh
+        y[:, 4:6] = xy + half_dw + half_dh
+        y[:, 6:8] = xy + half_dw - half_dh
+        y[:, 8] = angle
+        assert y.shape[0] == x.shape[0] and y.shape[-1] == 9
+        return y
+
+
+def xyxyxyxya2xywha(x):
+    """FG
+    Args:
+        x: boxes, the last dim is 9
+    Return:
+        y with almost same shape
+    """
+    if isinstance(x, torch.Tensor):
+        assert x.shape[-1] == 9
+        y = x.clone()
+        y.resize_(list(x.shape[:-1]) + [5,])
+        y[..., 0:2] = (x[..., 0:2] + x[..., 4:6]) / 2.0  # xy
+        y[..., 2] = torch.sqrt(torch.pow(x[..., 2] - x[..., 4], 2) + torch.pow(x[..., 3] - x[..., 5], 2))  # w: distance between x2y2 and x3y3
+        y[..., 3] = torch.sqrt(torch.pow(x[..., 0] - x[..., 2], 2) + torch.pow(x[..., 1] - x[..., 3], 2))  # h: distance between x1y1 and x2y2
+        y[..., 4] = x[..., 8]
+    else:
+        assert len(x.shape) == 2 and x.shape[-1] == 9
+        y = np.copy(x)
+        y.resize((x.shape[0], 5), refcheck=False)
+        y[:, 0:2] = (x[:, 0:2] + x[:, 4:6]) / 2.0  # xy
+        y[:, 2] = np.sqrt(np.power(x[:, 2] - x[:, 4], 2) + np.power(x[:, 3] - x[:, 5], 2))  # w
+        y[:, 3] = np.sqrt(np.power(x[:, 0] - x[:, 2], 2) + np.power(x[:, 1] - x[:, 3], 2))  # h
+        y[:, 4] = x[:, 8]
+    assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 5
+    return y
+
+
+# xyxyxyxya -> xywha
+# incomplete function: x1y1x2y2x3y3 -> wh
+def incomplete_xyxyxy2wh(x):
+    """FG
+    Args:
+        x: boxes, the last dim is 6
+    Return:
+        y with almost same shape
+    """
+    if isinstance(x, torch.Tensor):
+        assert x.shape[-1] == 6
+        y = x.clone()
+        y.resize_(list(x.shape[:-1]) + [2,])
+        y[..., 0] = torch.sqrt(torch.pow(x[..., 2] - x[..., 4], 2) + torch.pow(x[..., 3] - x[..., 5], 2))  # w
+        y[..., 1] = torch.sqrt(torch.pow(x[..., 0] - x[..., 2], 2) + torch.pow(x[..., 1] - x[..., 3], 2))  # h
+    else:
+        assert len(x.shape) == 2 and x.shape[-1] == 6
+        y = np.copy(x)
+        y.resize((x.shape[0], 2), refcheck=False)
+        y[:, 0] = np.sqrt(np.power(x[:, 2] - x[:, 4], 2) + np.power(x[:, 3] - x[:, 5], 2))  # w
+        y[:, 1] = np.sqrt(np.power(x[:, 0] - x[:, 2], 2) + np.power(x[:, 1] - x[:, 3], 2))  # h
+    assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 2
+    return y
+
+
+def incomplete_xyxyxy2xy(x):
+    """FG
+    Args:
+        x: boxes, the last dim is 6
+    Return:
+        y with almost same shape
+    """
+    if isinstance(x, torch.Tensor):
+        assert x.shape[-1] == 6
+        y = x.clone()
+        y.resize_(list(x.shape[:-1]) + [2,])
+        y = (x[..., 0:2] + x[..., 4:6]) / 2.0  # xy
+    else:
+        assert len(x.shape) == 2 and x.shape[-1] == 6
+        y = np.copy(x)
+        y.resize((x.shape[0], 2), refcheck=False)
+        y = (x[:, 0:2] + x[:, 4:6]) / 2.0  # xy
+    assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 2
     return y
 
 

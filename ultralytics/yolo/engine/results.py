@@ -172,16 +172,16 @@ class Boxes:
         if boxes.ndim == 1:
             boxes = boxes[None, :]
         n = boxes.shape[-1]
-        assert n in {6, 7}, f'expected `n` in [6, 7], but got {n}'  # xyxy, (track_id), conf, cls
+        assert n in {11, 12}, f'expected `n` in [11, 12], but got {n}'  # xyxyxyxya, (track_id), conf, cls
         # TODO
-        self.is_track = n == 7
+        self.is_track = n == 12
         self.boxes = boxes
         self.orig_shape = torch.as_tensor(orig_shape, device=boxes.device) if isinstance(boxes, torch.Tensor) \
             else np.asarray(orig_shape)
 
     @property
-    def xyxy(self):
-        return self.boxes[:, :4]
+    def xyxyxyxya(self):
+        return self.boxes[:, :9]
 
     @property
     def conf(self):
@@ -195,20 +195,20 @@ class Boxes:
     def id(self):
         return self.boxes[:, -3] if self.is_track else None
 
-    @property
-    @lru_cache(maxsize=2)  # maxsize 1 should suffice
-    def xywh(self):
-        return ops.xyxy2xywh(self.xyxy)
+    # @property
+    # @lru_cache(maxsize=2)  # maxsize 1 should suffice
+    # def xywh(self):
+    #     return ops.xyxy2xywh(self.xyxy)
 
     @property
     @lru_cache(maxsize=2)
-    def xyxyn(self):
-        return self.xyxy / self.orig_shape[[1, 0, 1, 0]]
+    def xyxyxyxyan(self):
+        return torch.cat((self.xyxyxyxya[:, :-1] / self.orig_shape[[1, 0, 1, 0, 1, 0, 1, 0]], self.xyxyxyxya[:, -1:]), dim=-1)
 
-    @property
-    @lru_cache(maxsize=2)
-    def xywhn(self):
-        return self.xywh / self.orig_shape[[1, 0, 1, 0]]
+    # @property
+    # @lru_cache(maxsize=2)
+    # def xywhn(self):
+    #     return self.xywh / self.orig_shape[[1, 0, 1, 0]]
 
     def cpu(self):
         return Boxes(self.boxes.cpu(), self.orig_shape)

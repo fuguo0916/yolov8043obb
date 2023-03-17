@@ -36,6 +36,7 @@ overlap_mask: True  # masks should overlap during training (segment train only)
 mask_ratio: 4  # mask downsample ratio (segment train only)
 # Classification
 dropout: 0.0  # use dropout regularization (classify train only)
+loss_choice:  # choice ["kfiou", "miou"]
 
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True  # validate/test during training
@@ -48,6 +49,7 @@ max_det: 300  # maximum number of detections per image
 half: False  # use half precision (FP16)
 dnn: False  # use OpenCV DNN for ONNX inference
 plots: True  # save plots during train/val
+valiou: # choice ["rotated_iou", "miou", "eiou"]
 
 # Prediction settings --------------------------------------------------------------------------------------------------
 source:  # source directory for images or videos

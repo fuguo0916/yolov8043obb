@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import math
 import random
@@ -13,7 +14,7 @@ from ..utils import LOGGER, colorstr
 from ..utils.checks import check_version
 from ..utils.instance import Instances
 from ..utils.metrics import bbox_ioa
-from ..utils.ops import segment2box
+from ..utils.ops import segment2box, incomplete_xyxyxy2wh
 from .utils import IMAGENET_MEAN, IMAGENET_STD, polygons2masks, polygons2masks_overlap
 
 
@@ -130,7 +131,7 @@ class Mosaic(BaseMixTransform):
             img = labels_patch['img']
             h, w = labels_patch.pop('resized_shape')
 
-            # place img in img4
+            # place img in img4  ## from b to a
             if i == 0:  # top left
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
@@ -158,7 +159,6 @@ class Mosaic(BaseMixTransform):
     def _update_labels(self, labels, padw, padh):
         """Update labels"""
         nh, nw = labels['img'].shape[:2]
-        labels['instances'].convert_bbox(format='xyxy')
         labels['instances'].denormalize(nw, nh)
         labels['instances'].add_padding(padw, padh)
         return labels
@@ -178,7 +178,12 @@ class Mosaic(BaseMixTransform):
             'cls': np.concatenate(cls, 0),
             'instances': Instances.concatenate(instances, axis=0),
             'mosaic_border': self.border}
-        final_labels['instances'].clip(self.imgsz * 2, self.imgsz * 2)
+        # final_labels['instances'].clip(self.imgsz * 2, self.imgsz * 2)
+        mask = final_labels['instances'].obb_filter(self.imgsz * 2, self.imgsz * 2)
+        final_labels["instances"]._bboxes.bboxes = final_labels["instances"]._bboxes.bboxes[mask, :]
+        final_labels["instances"].clip(self.imgsz * 2, self.imgsz * 2)
+        final_labels["cls"] = final_labels["cls"][mask]
+        assert len(final_labels["cls"]) == len(final_labels["instances"])
         return final_labels
 
 
@@ -263,24 +268,25 @@ class RandomPerspective:
         """apply affine to bboxes only.
 
         Args:
-            bboxes(ndarray): list of bboxes, xyxy format, with shape (num_bboxes, 4).
+            bboxes(ndarray): list of bboxes, Pixel-PolyTheta, with shape (num_bboxes, 9).
             M(ndarray): affine matrix.
         Returns:
-            new_bboxes(ndarray): bboxes after affine, [num_bboxes, 4].
+            new_bboxes(ndarray): bboxes after affine, [num_bboxes, 9].
         """
+        assert len(bboxes.shape) == 2 and bboxes.shape[-1] == 9
         n = len(bboxes)
         if n == 0:
             return bboxes
 
         xy = np.ones((n * 4, 3))
-        xy[:, :2] = bboxes[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(n * 4, 2)  # x1y1, x2y2, x1y2, x2y1
+        xy[:, :2] = bboxes[:, 0:8].reshape(n * 4, 2)
         xy = xy @ M.T  # transform
         xy = (xy[:, :2] / xy[:, 2:3] if self.perspective else xy[:, :2]).reshape(n, 8)  # perspective rescale or affine
 
         # create new boxes
-        x = xy[:, [0, 2, 4, 6]]
-        y = xy[:, [1, 3, 5, 7]]
-        return np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
+        new_bboxes = np.concatenate((xy, bboxes[:, 8:]), axis=1)
+        assert bboxes.shape == new_bboxes.shape
+        return new_bboxes
 
     def apply_segments(self, segments, M):
         """apply affine to segments and generate new bboxes from segments.
@@ -338,6 +344,10 @@ class RandomPerspective:
         Args:
             labels(Dict): a dict of `bboxes`, `segments`, `keypoints`.
         """
+        # FG. Perspective and rotation will destroy the angle
+        assert self.perspective == 0
+        assert self.degrees == 0
+
         if self.pre_transform and 'mosaic_border' not in labels:
             labels = self.pre_transform(labels)
             labels.pop('ratio_pad')  # do not need ratio pad
@@ -346,7 +356,7 @@ class RandomPerspective:
         cls = labels['cls']
         instances = labels.pop('instances')
         # make sure the coord formats are right
-        instances.convert_bbox(format='xyxy')
+        instances.convert_bbox(format='poly_theta')
         instances.denormalize(*img.shape[:2][::-1])
 
         border = labels.pop('mosaic_border', self.border)
@@ -365,26 +375,31 @@ class RandomPerspective:
 
         if keypoints is not None:
             keypoints = self.apply_keypoints(keypoints, M)
-        new_instances = Instances(bboxes, segments, keypoints, bbox_format='xyxy', normalized=False)
+        new_instances = Instances(bboxes, segments, keypoints, bbox_format='poly_theta', normalized=False)
         # clip
-        new_instances.clip(*self.size)
+        # new_instances.clip(*self.size)
+        # new_instances.obb_filter(*self.size)
 
         # filter instances
         instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
         # make the bboxes have the same scale with new_bboxes
-        i = self.box_candidates(box1=instances.bboxes.T,
-                                box2=new_instances.bboxes.T,
+        i = self.box_candidates(wh1=incomplete_xyxyxy2wh(instances.bboxes[:, :6]).T,
+                                wh2=incomplete_xyxyxy2wh(new_instances.bboxes[:, :6]).T,
                                 area_thr=0.01 if len(segments) else 0.10)
         labels['instances'] = new_instances[i]
         labels['cls'] = cls[i]
         labels['img'] = img
         labels['resized_shape'] = img.shape[:2]
+
+        mask = labels["instances"].obb_filter(*self.size)
+        labels["instances"]._bboxes.bboxes = labels["instances"]._bboxes.bboxes[mask, :]
+        labels["instances"].clip(*self.size)
+        labels["cls"] = labels["cls"][mask]
         return labels
 
-    def box_candidates(self, box1, box2, wh_thr=2, ar_thr=100, area_thr=0.1, eps=1e-16):  # box1(4,n), box2(4,n)
-        # Compute box candidates: box1 before augment, box2 after augment, wh_thr (pixels), aspect_ratio_thr, area_ratio
-        w1, h1 = box1[2] - box1[0], box1[3] - box1[1]
-        w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
+    def box_candidates(self, wh1, wh2, wh_thr=2, ar_thr=100, area_thr=0.1, eps=1e-16):
+        w1, h1 = wh1
+        w2, h2 = wh2
         ar = np.maximum(w2 / (h2 + eps), h2 / (w2 + eps))  # aspect ratio
         return (w2 > wh_thr) & (h2 > wh_thr) & (w2 * h2 / (w1 * h1 + eps) > area_thr) & (ar < ar_thr)  # candidates
 
@@ -425,7 +440,7 @@ class RandomFlip:
     def __call__(self, labels):
         img = labels['img']
         instances = labels.pop('instances')
-        instances.convert_bbox(format='xywh')
+        # instances.convert_bbox(format='xywh')
         h, w = img.shape[:2]
         h = 1 if instances.normalized else h
         w = 1 if instances.normalized else w
@@ -499,7 +514,7 @@ class LetterBox:
 
     def _update_labels(self, labels, ratio, padw, padh):
         """Update labels"""
-        labels['instances'].convert_bbox(format='xyxy')
+        labels['instances'].convert_bbox(format='poly_theta')
         labels['instances'].denormalize(*labels['img'].shape[:2][::-1])
         labels['instances'].scale(*ratio)
         labels['instances'].add_padding(padw, padh)
@@ -513,6 +528,10 @@ class CopyPaste:
 
     def __call__(self, labels):
         # Implement Copy-Paste augmentation https://arxiv.org/abs/2012.07177, labels as nx5 np.array(cls, xyxy)
+
+        # FG. Because the default probability of CopyPaste is zero. So only pass it.
+        return labels
+
         im = labels['img']
         cls = labels['cls']
         h, w = im.shape[:2]
@@ -574,6 +593,11 @@ class Albumentations:
             LOGGER.info(f'{prefix}{e}')
 
     def __call__(self, labels):
+        # FG. The default transform flag is None, so Albumentations won't run.
+        # So just beat it temporarily
+        return labels
+
+
         im = labels['img']
         cls = labels['cls']
         if len(cls):
@@ -593,7 +617,17 @@ class Albumentations:
 
 # TODO: technically this is not an augmentation, maybe we should put this to another files
 class Format:
-
+    """FG
+    Format of labels: {
+        im_file: "image_path",
+        ori_shape: (tuple:2) (h,w)
+        resized_shape: (tuple:2) (h,w)
+        img: tensor(c,h,w) RGB absolute
+        cls: tensor(n,1)
+        bboxes: tensor(n,9) Norm-PolyTheta
+        batch_idx: tensor(n,), not initialized yet
+    } (all reserved)
+    """
     def __init__(self,
                  bbox_format='xywh',
                  normalize=True,
@@ -631,7 +665,7 @@ class Format:
             instances.normalize(w, h)
         labels['img'] = self._format_img(img)
         labels['cls'] = torch.from_numpy(cls) if nl else torch.zeros(nl)
-        labels['bboxes'] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
+        labels['bboxes'] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 9))
         if self.return_keypoint:
             labels['keypoints'] = torch.from_numpy(instances.keypoints) if nl else torch.zeros((nl, 17, 2))
         # then we can use collate_fn
@@ -661,6 +695,20 @@ class Format:
 
 
 def v8_transforms(dataset, imgsz, hyp):
+    """FG
+    Compose{
+        Compose{
+            Mosaic,
+            CopyPaste,
+            RandomPerspective(pre=LetterBox)
+        },
+        MixUp,
+        Albumentations,
+        RandomHSV,
+        RandomFlip(vertical),
+        RandomFlip(horizontal)
+    }
+    """
     pre_transform = Compose([
         Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, border=[-imgsz // 2, -imgsz // 2]),
         CopyPaste(p=hyp.copy_paste),

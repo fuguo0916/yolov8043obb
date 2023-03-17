@@ -1,8 +1,11 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import sys
 from pathlib import Path
 from typing import List
+
+import torch
 
 from ultralytics import yolo  # noqa
 from ultralytics.nn.tasks import (ClassificationModel, DetectionModel, SegmentationModel, attempt_load_one_weight,
@@ -12,7 +15,7 @@ from ultralytics.yolo.engine.exporter import Exporter
 from ultralytics.yolo.utils import DEFAULT_CFG, DEFAULT_CFG_DICT, LOGGER, RANK, callbacks, yaml_load
 from ultralytics.yolo.utils.checks import check_file, check_imgsz, check_yaml
 from ultralytics.yolo.utils.downloads import GITHUB_ASSET_STEMS
-from ultralytics.yolo.utils.torch_utils import smart_inference_mode
+from ultralytics.yolo.utils.torch_utils import intersect_dicts, smart_inference_mode
 
 # Map head to model, trainer, validator, and predictor classes
 MODEL_MAP = {
@@ -65,7 +68,7 @@ class YOLO:
             list(ultralytics.yolo.engine.results.Results): The prediction results.
         """
 
-    def __init__(self, model='yolov8n.pt', type='v8') -> None:
+    def __init__(self, model='yolov8n.pt', type='v8', weight=None) -> None:
         """
         Initializes the YOLO model.
 
@@ -94,14 +97,14 @@ class YOLO:
         if not suffix and Path(model).stem in GITHUB_ASSET_STEMS:
             model, suffix = Path(model).with_suffix('.pt'), '.pt'  # add suffix, i.e. yolov8n -> yolov8n.pt
         if suffix == '.yaml':
-            self._new(model)
+            self._new(model, weight=weight)
         else:
             self._load(model)
 
     def __call__(self, source=None, stream=False, **kwargs):
         return self.predict(source, stream, **kwargs)
 
-    def _new(self, cfg: str, verbose=True):
+    def _new(self, cfg: str, verbose=True, weight=None):
         """
         Initializes a new model and infers the task type from the model definitions.
 
@@ -115,6 +118,18 @@ class YOLO:
         self.ModelClass, self.TrainerClass, self.ValidatorClass, self.PredictorClass = self._assign_ops_from_task()
         self.model = self.ModelClass(cfg_dict, verbose=verbose and RANK == -1)  # initialize
         self.overrides['model'] = self.cfg
+
+        if weight:
+            assert weight.endswith(".pt")
+            pt = weight
+            ckpt = torch.load(pt)
+            csd = ckpt["model"].float().state_dict()
+            csd = intersect_dicts(csd, self.model.state_dict())
+            self.model.load_state_dict(csd, strict=False)
+            print(f"Transferred {len(csd)}/{len(self.model.state_dict())} from {pt}")
+            self.ckpt = ckpt
+            self.ckpt_path = weight
+
 
     def _load(self, weights: str):
         """
@@ -282,18 +297,23 @@ class YOLO:
         overrides.update(kwargs)
         if kwargs.get('cfg'):
             LOGGER.info(f"cfg file passed. Overriding default params with {kwargs['cfg']}.")
-            overrides = yaml_load(check_yaml(kwargs['cfg']), append_filename=True)
+            overrides = yaml_load(check_yaml(kwargs['cfg']), append_filename=False)
         overrides['task'] = self.task
         overrides['mode'] = 'train'
+        ## add the configs if supplied in kwargs
+        for key in kwargs.keys():
+            if key in overrides.keys():
+                overrides[key] = kwargs.get(key)
         if not overrides.get('data'):
             raise AttributeError("Dataset required but missing, i.e. pass 'data=coco128.yaml'")
         if overrides.get('resume'):
             overrides['resume'] = self.ckpt_path
 
         self.trainer = self.TrainerClass(overrides=overrides)
-        if not overrides.get('resume'):  # manually set model only if not resuming
-            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
-            self.model = self.trainer.model
+        # if not overrides.get('resume'):  # manually set model only if not resuming
+        #     self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
+        #     self.model = self.trainer.model
+        self.trainer.model = self.model
         self.trainer.train()
         # update model and cfg after training
         if RANK in {0, -1}:

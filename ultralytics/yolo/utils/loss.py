@@ -1,10 +1,11 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .metrics import bbox_iou
+from .metrics import bbox_iou, obb_iou
 from .tal import bbox2dist
 
 
@@ -23,20 +24,31 @@ class VarifocalLoss(nn.Module):
 
 class BboxLoss(nn.Module):
 
-    def __init__(self, reg_max, use_dfl=False):
+    def __init__(self, reg_max, use_dfl=False, loss_choice=None):
         super().__init__()
         self.reg_max = reg_max
         self.use_dfl = use_dfl
+        self.loss_choice = loss_choice if loss_choice else "miou"
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+        """FG
+        Args:
+            pred_dist: Tensor(bs, na, 4*reg_max) raw data
+            pred_bboxes: Tensor(bs, na, 9) Grid-PolyTheta
+            anchor_points: Tensor(na, 2) Grid relative
+            target_bboxes: Tensor(bs, na, 9) Grid-PolyTheta
+            target_scores: Tensor(bs, na, nc) 0-1
+            target_scores_sum: Tensor()
+            fg_mask: Tensor(bs, na) T/F if matched
+        """
         # IoU loss
-        weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)  ## (np, 1)
+        iou = obb_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], choice=self.loss_choice)  # bbox_iou ## (np, 1)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
         if self.use_dfl:
-            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)  ## (bs,na,4)
             loss_dfl = self._df_loss(pred_dist[fg_mask].view(-1, self.reg_max + 1), target_ltrb[fg_mask]) * weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
@@ -48,6 +60,13 @@ class BboxLoss(nn.Module):
     def _df_loss(pred_dist, target):
         # Return sum of left and right DFL losses
         # Distribution Focal Loss (DFL) proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
+        """FG
+        Args:
+            pred_dist: Tensor(np * 4, reg_max) raw data
+            target: Tensor(np, 4), Grid ltrb
+        Return:
+            dfl_loss
+        """
         tl = target.long()  # target left
         tr = tl + 1  # target right
         wl = tr - target  # weight left

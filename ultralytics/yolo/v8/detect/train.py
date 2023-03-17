@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 from copy import copy
 
 import numpy as np
@@ -12,7 +13,7 @@ from ultralytics.yolo.data.dataloaders.v5loader import create_dataloader
 from ultralytics.yolo.engine.trainer import BaseTrainer
 from ultralytics.yolo.utils import DEFAULT_CFG, RANK, colorstr
 from ultralytics.yolo.utils.loss import BboxLoss
-from ultralytics.yolo.utils.ops import xywh2xyxy
+from ultralytics.yolo.utils.ops import xywh2xyxy, xywha2xyxyxyxya
 from ultralytics.yolo.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.yolo.utils.tal import TaskAlignedAssigner, dist2bbox, make_anchors
 from ultralytics.yolo.utils.torch_utils import de_parallel
@@ -42,6 +43,7 @@ class DetectionTrainer(BaseTrainer):
                                  seed=self.args.seed)[0] if self.args.v5loader else \
             build_dataloader(self.args, batch_size, img_path=dataset_path, stride=gs, rank=rank, mode=mode,
                              rect=mode == 'val', names=self.data['names'])[0]
+            # rect iff val
 
     def preprocess_batch(self, batch):
         batch['img'] = batch['img'].to(self.device, non_blocking=True).float() / 255
@@ -73,7 +75,7 @@ class DetectionTrainer(BaseTrainer):
 
     def criterion(self, preds, batch):
         if not hasattr(self, 'compute_loss'):
-            self.compute_loss = Loss(de_parallel(self.model))
+            self.compute_loss = Loss(de_parallel(self.model), loss_choice=self.args.loss_choice)
         return self.compute_loss(preds, batch)
 
     def label_loss_items(self, loss_items=None, prefix='train'):
@@ -112,7 +114,7 @@ class DetectionTrainer(BaseTrainer):
 # Criterion class for computing training losses
 class Loss:
 
-    def __init__(self, model):  # model must be de-paralleled
+    def __init__(self, model, loss_choice=None):  # model must be de-paralleled
 
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -128,66 +130,97 @@ class Loss:
 
         self.use_dfl = m.reg_max > 1
         roll_out_thr = h.min_memory if h.min_memory > 1 else 64 if h.min_memory else 0  # 64 is default
+        self.loss_choice = loss_choice if loss_choice else "miou"
 
         self.assigner = TaskAlignedAssigner(topk=10,
                                             num_classes=self.nc,
                                             alpha=0.5,
                                             beta=6.0,
                                             roll_out_thr=roll_out_thr)
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl, loss_choice=self.loss_choice).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         if targets.shape[0] == 0:
-            out = torch.zeros(batch_size, 0, 5, device=self.device)
+            out = torch.zeros(batch_size, 0, 10, device=self.device)
         else:
             i = targets[:, 0]  # image index
             _, counts = i.unique(return_counts=True)
-            out = torch.zeros(batch_size, counts.max(), 5, device=self.device)
+            out = torch.zeros(batch_size, counts.max(), 10, device=self.device)
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum()
                 if n:
                     out[j, :n] = targets[matches, 1:]
-            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
-        return out
+            out[..., 1:10] = out[..., 1:10].mul_(scale_tensor)
+        return out  # (bs, n_max_gt, 10), cls+xyxyxyxya
 
-    def bbox_decode(self, anchor_points, pred_dist):
+    def bbox_decode(self, anchor_points, pred_dist, pred_angle):
+        """FG
+        Args:
+            anchor_points: Tensor(na, 2)
+            pred_dist: Tensor(bs, na, 4*reg_max) raw data
+            pred_angle: Tensor(bs, na, 1) raw data
+        Return:
+
+        """
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
-        return dist2bbox(pred_dist, anchor_points, xywh=False)
+        pred_angle = (pred_angle.sigmoid() - 0.5).mul(3.1415926)
+        return dist2bbox(pred_dist, pred_angle, anchor_points)
 
     def __call__(self, preds, batch):
+        """FG
+        preds is unprocessed prediction as [Tensor(bs,no,h1,w1), Tensor(bs,no,h2,w2), Tensor(bs,no,h3,w3)]
+        batch['img']: Tensor(bs,3,h,w) normalized
+        batch['cls']: Tensor(nt,1)
+        batch['bboxes']: Tensor(nt,9) Norm-PolyTheta
+        batch['batch_idx']: Tensor(nt,)
+        batch[...]
+        """
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
-        feats = preds[1] if isinstance(preds, tuple) else preds
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, self.nc), 1)
+        feats = preds[1] if isinstance(preds, tuple) else preds  ## feats is preds
+        pred_distri, pred_angle, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, 1, self.nc), 1)
 
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+        pred_angle = pred_angle.permute(0, 2, 1).contiguous()
+
+        ## pred_scores: Tensor(bs, na, nc); pred_angle: Tensor(bs, na, 1); pred_distri: Tensor(bs, na, 4*reg_max)
+        ## where na (number of anchor points) = h1*w1 + h2*w2 + h3*w3
+        ## all 3 are nonprocessed predictions
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
-        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+        h, w = imgsz
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)  ## Tensor(na,2) grid relative, Tensor(na,1)
 
         # targets
         targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
-        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
+        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=torch.tensor([w, h, w, h, w, h, w, h, 1], device=self.device))
+        # Tensor(bs, n_max_gt, 10) cls+poly9, Pixel-Poly
+        gt_labels, gt_bboxes = targets.split((1, 9), 2)  ## Tensor(bs, n_max_gt, 1cls), Tensor(bs, n_max_gt, 9) Pixel-Poly
+        mask_gt = gt_bboxes[..., :-1].sum(2, keepdim=True).gt_(0)  ## Tensor(bs, n_max_gt, 1)
 
         # pboxes
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri, pred_angle)  ## Tensor(bs,na,9) Grid-Poly
 
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
-            pred_scores.detach().sigmoid(), (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            pred_scores.detach().sigmoid(),
+            (torch.cat((pred_bboxes.detach()[..., :8] * stride_tensor, pred_bboxes.detach()[..., 8:]), dim=-1)).type(gt_bboxes.dtype),
             anchor_points * stride_tensor, gt_labels, gt_bboxes, mask_gt)
+        """FG
+            target_bboxes: Tensor(bs, na, 9) Pixel-Poly
+            target_scores: Tensor(bs, na, nc) overlap roughly
+            fg_mask: Tensor(bs, na) T/F if matched
+        """
 
-        target_bboxes /= stride_tensor
+        target_bboxes[..., :8] /= stride_tensor  ## target_bboxes: Grid-Poly
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss

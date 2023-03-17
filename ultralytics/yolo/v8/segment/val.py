@@ -110,6 +110,7 @@ class SegmentationValidator(DetectionValidator):
                 self.plot_masks.append(pred_masks[:15].cpu())  # filter top 15 to plot
 
             # Save
+            assert False  ## we won't arrive here to save_json for segment
             if self.args.save_json:
                 pred_masks = ops.scale_image(batch['img'][si].shape[1:],
                                              pred_masks.permute(1, 2, 0).contiguous().cpu().numpy(),

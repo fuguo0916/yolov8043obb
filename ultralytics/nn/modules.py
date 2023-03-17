@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, GPL-3.0 license
+# Checked by FG 20230310
 """
 Common modules
 """
@@ -69,6 +70,13 @@ class ConvTranspose(nn.Module):
 class DFL(nn.Module):
     # Integral module of Distribution Focal Loss (DFL) proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
     def __init__(self, c1=16):
+        """FG
+        Args:
+            c1: reg_max, such as 16
+        Intermediates:
+            x: the projection tensor such as [0., 1., ..., 15.]
+            self.conv.weight.data: unsqueeze x into shape (1, reg_max, 1, 1)
+        """
         super().__init__()
         self.conv = nn.Conv2d(c1, 1, 1, bias=False).requires_grad_(False)
         x = torch.arange(c1, dtype=torch.float)
@@ -76,8 +84,8 @@ class DFL(nn.Module):
         self.c1 = c1
 
     def forward(self, x):
-        b, c, a = x.shape  # batch, channels, anchors
-        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
+        b, c, a = x.shape  # batch, channels, anchors ## e.g. (8,64,1848)
+        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)  # dist Tensor(bs,4,na) Grid
         # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
 
 
@@ -379,6 +387,9 @@ class Ensemble(nn.ModuleList):
 
 # heads
 class Detect(nn.Module):
+    """FG
+    dynamic and export are False here
+    """
     # YOLOv8 Detect head for detection models
     dynamic = False  # force grid reconstruction
     export = False  # export mode
@@ -387,37 +398,68 @@ class Detect(nn.Module):
     strides = torch.empty(0)  # init
 
     def __init__(self, nc=80, ch=()):  # detection layer
+        """FG
+        Args:
+            ch: a list of input channels, such as [64, 128, 256]
+        Saved:
+            self.nl: number of detection layers
+            self.stride: a list of strides, such as [8., 16., 32.], not initialized here but later
+            self.no: number of outputs per layer, {reg_max * 4 + 1} + {nc}
+            self.dfl: used for val or test (including val on training)
+        Intermidiates:
+            c2: hidden channels of the first group of heads (box and angle)
+            c3: hidden channels of the second group of heads (class)
+        """
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
+        self.no = nc + self.reg_max * 4 + 1  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
 
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], self.nc)  # channels
-        self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
+        self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max + 1, 1)) for x in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
-        shape = x[0].shape  # BCHW
+        shape = x[0].shape  # BCHW ## (bs, _, h1, w1)
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)  ## (bs, no, h1, w1), (bs, no, h2, w2), (bs, no, h3, w3)
         if self.training:
             return x
         elif self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            ## self.anchors: Tensor(2, na) Grid relative
+            ## self.strides: Tensor(1, na)
             self.shape = shape
 
         if self.export and self.format == 'edgetpu':  # FlexSplitV ops issue
             x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
             box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+            agl = x_cat[:, self.reg_max * 4: self.reg_max * 4 + 1]
+            cls = x_cat[:, self.reg_max * 4 + 1:]
         else:
-            box, cls = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2).split((self.reg_max * 4, self.nc), 1)
-        dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
-        y = torch.cat((dbox, cls.sigmoid()), 1)
+            box, agl, cls = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2).split((self.reg_max * 4, 1, self.nc), 1)
+            """FG
+            box: Tensor(bs, 4*reg_max, na) raw data
+            agl: Tensor(bs, 1, na) raw data
+            cls: Tensor(bs, nc, na) raw data
+            """
+        ##
+        agl = (agl.sigmoid() - 0.5).mul(3.1415926)
+        xy4 = dist2bbox(self.dfl(box), agl, self.anchors.unsqueeze(0), dim=1).narrow(1, 0, 8) * self.strides
+        """FG
+            self.dfl(box):              Tensor(bs, 4, na) Grid
+            agl:                        Tensor(bs, 1, na) processed
+            self.anchors.unsqueeze(0):  Tensor(1,2,na) Grid
+            dist2bbox(...):             Tensor(bs,9,na) Grid-PolyTheta
+            xywh:                       Tensor(bs,8,na) Pixel-PolyTheta
+        """
+        y = torch.cat((xy4, agl, cls.sigmoid()), 1)
+        """FG
+        Tensor(bs,5+nc,na) Pixel-Centered box + scores 0-1
+        """
         return y if self.export else (y, x)
 
     def bias_init(self):
