@@ -17,6 +17,10 @@ from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights,
                                                 intersect_dicts, make_divisible, model_info, scale_img, time_sync)
 from ultralytics.nn.attentions.SE import SEAttention
+from ultralytics.nn.attentions.BAM import BAMBlock
+from ultralytics.nn.attentions.CBAM import CBAMBlock
+from ultralytics.nn.attentions.GC import GlobalContext
+from ultralytics.nn.attentions.SK import SKAttention
 
 
 class BaseModel(nn.Module):
@@ -461,7 +465,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(args[2] * gw, 8)
-        elif m in {SEAttention}:  ## attention
+        elif m in {SEAttention, SKAttention, GlobalContext, BAMBlock, CBAMBlock}:  ## attention
             args = [ch[f], *args]
         else:
             c2 = ch[f]

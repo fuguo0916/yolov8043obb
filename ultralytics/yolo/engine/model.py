@@ -296,6 +296,10 @@ class YOLO:
             overrides = yaml_load(check_yaml(kwargs['cfg']), append_filename=False)
         overrides['task'] = self.task
         overrides['mode'] = 'train'
+        ## add the configs if supplied in kwargs
+        for key in kwargs.keys():
+            if key in ["project", "name", "batch", "epochs", "imgsz"]:
+                overrides[key] = kwargs.get(key)
         if not overrides.get('data'):
             raise AttributeError("Dataset required but missing, i.e. pass 'data=coco128.yaml'")
         if overrides.get('resume'):
