@@ -298,7 +298,7 @@ class YOLO:
         overrides['mode'] = 'train'
         ## add the configs if supplied in kwargs
         for key in kwargs.keys():
-            if key in ["project", "name", "batch", "epochs", "imgsz"]:
+            if key in overrides.keys():
                 overrides[key] = kwargs.get(key)
         if not overrides.get('data'):
             raise AttributeError("Dataset required but missing, i.e. pass 'data=coco128.yaml'")
