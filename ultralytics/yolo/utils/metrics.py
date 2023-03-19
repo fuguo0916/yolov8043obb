@@ -222,37 +222,30 @@ def obb_iou(box1, box2, eps=1e-7, choice="miou"):
         hbb_iou = bbox_iou(box1, box2, xywh=False, eps=eps)
         iou = hbb_iou * angle_similarity
     elif choice == "kfiou":
+        """FG
+        This is used only in calculating box_loss during both train and val.
+        box1: Tensor(n, 9)
+        box2: Tensor(n, 9)
+        """
         def xyxyxyxya2xywha(x):
-            """FG
-            Args:
-                x: boxes, the last dim is 9
-            Return:
-                y with almost same shape
-            """
             if isinstance(x, torch.Tensor):
                 assert x.shape[-1] == 9
-                y = x.clone()
-                y.resize_(list(x.shape[:-1]) + [5,])
+                y = x[..., :5].clone()
                 y[..., 0:2] = (x[..., 0:2] + x[..., 4:6]) / 2.0  # xy
                 y[..., 2] = torch.sqrt(torch.pow(x[..., 2] - x[..., 4], 2) + torch.pow(x[..., 3] - x[..., 5], 2))  # w: distance between x2y2 and x3y3
                 y[..., 3] = torch.sqrt(torch.pow(x[..., 0] - x[..., 2], 2) + torch.pow(x[..., 1] - x[..., 3], 2))  # h: distance between x1y1 and x2y2
                 y[..., 4] = x[..., 8]
             else:
-                assert len(x.shape) == 2 and x.shape[-1] == 9
-                y = np.copy(x)
-                y.resize((x.shape[0], 5), refcheck=False)
-                y[:, 0:2] = (x[:, 0:2] + x[:, 4:6]) / 2.0  # xy
-                y[:, 2] = np.sqrt(np.power(x[:, 2] - x[:, 4], 2) + np.power(x[:, 3] - x[:, 5], 2))  # w
-                y[:, 3] = np.sqrt(np.power(x[:, 0] - x[:, 2], 2) + np.power(x[:, 1] - x[:, 3], 2))  # h
-                y[:, 4] = x[:, 8]
+                assert False
             assert y.shape[:-1] == x.shape[:-1] and y.shape[-1] == 5
             return y
 
+        assert isinstance(box1, torch.Tensor) and isinstance(box2, torch.Tensor)
+        assert box1.shape == box2.shape and len(box1.shape) == 2 and box1.shape[-1] == 9, f"\nbox1.shape: {box1.shape}\nbox2.shape: {box2.shape}\n"
         box1 = xyxyxyxya2xywha(box1)
         box2 = xyxyxyxya2xywha(box2)
-        print(f"box1: {box1.shape}\nbox2: {box2.shape}")
         iou = kfiou(box1, box2, box1, box2)
-        assert False, f"\nbox1: {box1.shape}\nbox2: {box2.shape}\nkfiou: {iou.shape}"
+        iou = iou.unsqueeze(-1)
         
     assert iou.shape[-1] == 1
     return iou

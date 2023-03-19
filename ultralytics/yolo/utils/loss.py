@@ -42,7 +42,7 @@ class BboxLoss(nn.Module):
         """
         # IoU loss
         weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)  ## (np, 1)
-        iou = obb_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask])  # bbox_iou ## (np, 1)
+        iou = obb_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], choice="kfiou")  # bbox_iou ## (np, 1)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
