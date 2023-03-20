@@ -168,9 +168,9 @@ def plot_labels(boxes, cls, names=(), save_dir=Path('')):
     # TODO: FG. To be refined. This function is called before training to see features of labels.
     # plot dataset labels
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
-    b = boxes.transpose()[:4]  # classes, boxes
+    b = xyxyxyxya2xywha(boxes[:, :9]).transpose()  # classes, boxes
     nc = int(cls.max() + 1)  # number of classes
-    x = pd.DataFrame(b.transpose(), columns=['x', 'y', 'width', 'height'])
+    x = pd.DataFrame(b.transpose(), columns=['x', 'y', 'width', 'height', 'angle'])
 
     # seaborn correlogram
     sn.pairplot(x, corner=True, diag_kind='auto', kind='hist', diag_kws=dict(bins=50), plot_kws=dict(pmax=0.9))
@@ -193,11 +193,18 @@ def plot_labels(boxes, cls, names=(), save_dir=Path('')):
     sn.histplot(x, x='width', y='height', ax=ax[3], bins=50, pmax=0.9)
 
     # rectangles
-    boxes[:, 0:2] = 0.5  # center
-    boxes = xywh2xyxy(boxes) * 2000
+    # boxes[:, 0:2] = 0.5  # center
+    # boxes = xywh2xyxy(boxes) * 2000
+    boxes = boxes[:1000]
+    x_offset = 0.5 - (boxes[:, 0:1] + boxes[:, 4:5]) / 2.0
+    y_offset = 0.5 - (boxes[:, 1:2] + boxes[:, 5:6]) / 2.0
+    boxes[:, [0, 2, 4, 6]] += x_offset
+    boxes[:, [1, 3, 5, 7]] += y_offset
+    boxes[:, :8] *= 2000
     img = Image.fromarray(np.ones((2000, 2000, 3), dtype=np.uint8) * 255)
     for cls, box in zip(cls[:1000], boxes[:1000]):
-        ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls))  # plot
+        vertices = [(box[0], box[1]), (box[2], box[3]), (box[4], box[5]), (box[6], box[7])]
+        ImageDraw.Draw(img).rectangle(vertices, width=1, outline=colors(cls))  # plot
     ax[1].imshow(img)
     ax[1].axis('off')
 
