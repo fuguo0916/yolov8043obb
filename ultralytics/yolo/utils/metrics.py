@@ -198,6 +198,8 @@ def kfiou(pred, target, pred_decode=None, targets_decode=None, beta=1.0 / 9.0, e
 
     # loss = (xy_loss + kf_loss).clamp(0)
 
+    KFIoU = KFIoU * 3.0
+
     return KFIoU
     
 
