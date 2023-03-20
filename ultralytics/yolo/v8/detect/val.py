@@ -223,16 +223,21 @@ class DetectionValidator(BaseValidator):
                     names=self.names)  # pred
 
     def pred_to_json(self, predn, filename):
+        """FG
+        Args:
+            predn: (npr, 11) Pixel-PolyTheta, score, class
+        """
         stem = Path(filename).stem
         image_id = int(stem) if stem.isnumeric() else stem
-        box = ops.xyxy2xywh(predn[:, :4])  # xywh
-        box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
+        # box = ops.xyxy2xywh(predn[:, :4])  # xywh
+        # box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
+        box = ops.xyxyxyxya2xywha(predn[:, :9])
         for p, b in zip(predn.tolist(), box.tolist()):
             self.jdict.append({
                 'image_id': image_id,
-                'category_id': self.class_map[int(p[5])],
+                'category_id': self.class_map[int(p[10])],
                 'bbox': [round(x, 3) for x in b],
-                'score': round(p[4], 5)})
+                'score': round(p[9], 5)})
 
     def eval_json(self, stats):
         if self.args.save_json and self.is_coco and len(self.jdict):
