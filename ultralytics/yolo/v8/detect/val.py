@@ -223,7 +223,6 @@ class DetectionValidator(BaseValidator):
                     names=self.names)  # pred
 
     def pred_to_json(self, predn, filename):
-        assert False
         stem = Path(filename).stem
         image_id = int(stem) if stem.isnumeric() else stem
         box = ops.xyxy2xywh(predn[:, :4])  # xywh
