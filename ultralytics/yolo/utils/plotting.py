@@ -204,7 +204,7 @@ def plot_labels(boxes, cls, names=(), save_dir=Path('')):
     img = Image.fromarray(np.ones((2000, 2000, 3), dtype=np.uint8) * 255)
     for cls, box in zip(cls[:1000], boxes[:1000]):
         vertices = [(box[0], box[1]), (box[2], box[3]), (box[4], box[5]), (box[6], box[7])]
-        ImageDraw.Draw(img).rectangle(vertices, width=1, outline=colors(cls))  # plot
+        ImageDraw.Draw(img).polygon(vertices, width=1, outline=colors(cls))  # plot
     ax[1].imshow(img)
     ax[1].axis('off')
 
