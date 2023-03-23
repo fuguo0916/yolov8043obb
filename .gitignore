@@ -159,3 +159,6 @@ weights/
 /.idea/
 /.vscode/
 Arial.ttf
+*.out
+*.tar
+/whisper.txt
