@@ -120,13 +120,13 @@ class YOLODataset(BaseDataset):
         """
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix('.cache')
-        # try:
-        #     cache, exists = np.load(str(cache_path), allow_pickle=True).item(), True  # load dict
-        #     assert cache['version'] == self.cache_version  # matches current version
-        #     assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
-        # except (FileNotFoundError, AssertionError, AttributeError):
-        #     cache, exists = self.cache_labels(cache_path), False  # run cache ops
-        cache, exists = self.cache_labels(cache_path), False  # run cache ops
+        try:
+            cache, exists = np.load(str(cache_path), allow_pickle=True).item(), True  # load dict
+            assert cache['version'] == self.cache_version  # matches current version
+            assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
+        except (FileNotFoundError, AssertionError, AttributeError):
+            cache, exists = self.cache_labels(cache_path), False  # run cache ops
+        # cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupt, total
