@@ -7,7 +7,7 @@ csvs2labels = {
     # "runs/train_03_att/train_e1200_iou3_b16_i960_valriou_noatt_close300/results.csv":       "i960(1200e, close300, MIoU, noatt)",
     # "runs/train_03_att/train_e1500_iou3_b16_i640_kfiou_valriou_noatt_close500/results.csv": "i640(1500e, close500, KFIoU, Early Stopped)",
     # "runs/train_03_att/train_e1500_iou3_b16_i960_kfiou_valriou_noatt_close500/results.csv": "i960(1500e, close500, KFIoU)",
-    "runs/train_04_att/train_e1000_iou3_b16_i640_kfiou_valriou_noatt_close200/results.csv":     "i640(1000e, close200, KFIoU)",
+    # "runs/train_04_att/train_e1000_iou3_b16_i640_kfiou_valriou_noatt_close200/results.csv":     "i640(1000e, close200, KFIoU)",
     # "runs/train_04_att/train_e1000_iou3_b16_i640_kfiou_valriou_CBAM_close200/results.csv":      "i640(1000e, close200, KFIoU, CBAM)",
     # "runs/train_04_att/train_e1000_iou3_b16_i640_kfiou_valriou_SE_close200/results.csv":        "i640(1000e, close200, KFIoU, SE)",
     # "runs/train_04_att/train_e1000_iou3_b16_i640_kfiou_valriou_GC_close200/results.csv":        "i640(1000e, close200, KFIoU, GC)",
@@ -22,7 +22,8 @@ csvs2labels = {
     # "runs/train_07_imgsz/train_e1000_iou3_b16_i320_kfiou_valriou_noatt_close200/results.csv":   "i320(1000e, close200, KFIoU)",
     # "runs/train_07_imgsz/train_e1000_iou3_b16_i960_kfiou_valriou_noatt_close200_amend/results.csv":   "i960(1000e, close200, KFIoU)",
     # "runs/train_07_imgsz/train_e1000_iou3_b8_i1280_kfiou_valriou_noatt_close200/results.csv":  "i1280(1000e, close200, KFIoU)",
-    "runs/train_08_miou/train_e1000_iou3_b16_i640_miou_valriou_noatt_close200/results.csv":     "i640(1000e, close200, MIoU)"
+    "runs/train_08_miou/train_e1000_iou3_b16_i640_miou_valriou_noatt_close200/results.csv":     "i640(1000e, close200, MIoU)",
+    "runs/train_10_smooth/trainl_e1000_iou3_b16_i640_miou_valriou_noatt_close200_smooth0/results.csv": "i640(1000e, close200, MIoU, No Smooth)",
 }
 
 # img_caption = "train_06_epochs"
@@ -31,8 +32,10 @@ csvs2labels = {
 # img_path = "runs/train_05_close/plot.png"
 # img_caption = "train_07_imgsz"
 # img_path = "runs/train_07_imgsz/plot.png"
-img_caption = "train_08_miou"
-img_path = "runs/train_08_miou/plot.png"
+# img_caption = "train_08_miou"
+# img_path = "runs/train_08_miou/plot.png"
+img_caption = "train_10_smooth"
+img_path = "runs/train_10_smooth/plot.png"
 
 map50_95_lists = [[] for _ in range(len(csvs2labels))]
 
