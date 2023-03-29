@@ -119,7 +119,20 @@ class YOLO:
         self.model = self.ModelClass(cfg_dict, verbose=verbose and RANK == -1)  # initialize
         self.overrides['model'] = self.cfg
 
-        pt = "yolov8s.pt"  ## TODO: Change model's weight
+        # pt = "yolov8s.pt"  ## TODO: Change model's weight
+        def get_model_domain(cfg):
+            domains = ["yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"]
+            for domain in domains:
+                if domain in cfg:
+                    return domain
+            return None
+        
+        model_domain = get_model_domain(cfg)
+        if model_domain:
+            pt = model_domain + ".pt"
+        else:
+            print("Warning: wrong format of model config file name!")
+            pt = "yolov8s.pt"
         ckpt = torch.load(pt)
         csd = ckpt["model"].float().state_dict()
         csd = intersect_dicts(csd, self.model.state_dict())
