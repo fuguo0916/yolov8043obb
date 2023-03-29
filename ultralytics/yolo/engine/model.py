@@ -129,6 +129,7 @@ class YOLO:
         
         model_domain = get_model_domain(cfg)
         if model_domain:
+            # pt = model_domain + "_pretrained.pt"
             pt = model_domain + ".pt"
         else:
             print("Warning: wrong format of model config file name!")

@@ -1,0 +1,4 @@
+nc: 1
+train: /root/autodl-tmp/yolov8043obb/airbus/train.txt
+val: /root/autodl-tmp/yolov8043obb/airbus/val.txt
+names: ["ship", "2nd class", "3rd class"]
