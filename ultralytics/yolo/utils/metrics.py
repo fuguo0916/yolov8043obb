@@ -309,7 +309,25 @@ def obb_iou_for_metrics(box1, box2, choice="rotated_iou", eps=1e-7):
             # print(f"piou: {piou.data}")
             pious[:, i] = piou
         return pious
-
+    elif choice in ["eiou"]:
+        def obb_iou_enclosing(box1, box2, eps=1e-7):
+            """FG
+            Args:
+                box1: obb with shape (N, 5/9)
+                box2: obb with shape (M, 5/9)
+            Return:
+                enclosing iou between box1 and box2 with shape (N, M)
+            """
+            assert len(box1.shape) == 2 and len(box2.shape) == 2
+            assert box1.shape[-1] == box2.shape[-1]
+            assert box1.shape[-1] == 9
+            box1 = get_enclosing_hbb(box1)
+            box2 = get_enclosing_hbb(box2)
+            iou = box_iou(box1, box2)
+            assert len(iou.shape) == 2 and iou.shape[0] == box1.shape[0] and iou.shape[1] == box2.shape[0]
+            return iou
+        
+        return obb_iou_enclosing(box1, box2, eps=1e-7)
     else:
         assert False
 

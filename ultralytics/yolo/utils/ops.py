@@ -224,10 +224,10 @@ def non_max_suppression(
         ## box: Tensor(na', 9) Pixel-PolyTheta; cls: Tensor(na', nc) 0-1; mask: Tensor(na', 0)
         if multi_label:
             i, j = (cls > conf_thres).nonzero(as_tuple=False).T  ## Tensor(ns,), nac is number of scores in (na*nc) over conf
-            x = torch.cat((box[i], x[i, 9 + j, None], j[:, None].float(), mask[i]), 1)  ## Tensor(ns,7) Pixel-PolyTheta, conf, pred_label
+            x = torch.cat((box[i], x[i, 9 + j, None], j[:, None].float(), mask[i]), 1)  ## Tensor(ns,11) Pixel-PolyTheta, conf, pred_label
         else:  # best class only
             conf, j = cls.max(1, keepdim=True)  ## both Tensor(na', 1)
-            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]  ## Tensor(na',7) Pixel-PolyTheta, conf, pred_label
+            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]  ## Tensor(na',11) Pixel-PolyTheta, conf, pred_label
 
         # Filter by class
         if classes is not None:
@@ -245,7 +245,6 @@ def non_max_suppression(
         x = x[x[:, 9].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
 
         # Batched NMS
-        # TODO: FG. Use enclosing hbb for nms temporarily and set iou_thres half. Remember to change it back.
         nms_choice = "riou"
         if nms_choice == "miou":
             hbb = get_enclosing_hbb(x[:, :9])
