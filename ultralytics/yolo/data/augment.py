@@ -181,6 +181,7 @@ class Mosaic(BaseMixTransform):
         # final_labels['instances'].clip(self.imgsz * 2, self.imgsz * 2)
         mask = final_labels['instances'].obb_filter(self.imgsz * 2, self.imgsz * 2)
         final_labels["instances"]._bboxes.bboxes = final_labels["instances"]._bboxes.bboxes[mask, :]
+        final_labels["instances"].clip(self.imgsz * 2, self.imgsz * 2)
         final_labels["cls"] = final_labels["cls"][mask]
         assert len(final_labels["cls"]) == len(final_labels["instances"])
         return final_labels
@@ -392,6 +393,7 @@ class RandomPerspective:
 
         mask = labels["instances"].obb_filter(*self.size)
         labels["instances"]._bboxes.bboxes = labels["instances"]._bboxes.bboxes[mask, :]
+        labels["instances"].clip(*self.size)
         labels["cls"] = labels["cls"][mask]
         return labels
 
