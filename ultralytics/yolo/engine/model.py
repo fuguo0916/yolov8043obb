@@ -68,7 +68,7 @@ class YOLO:
             list(ultralytics.yolo.engine.results.Results): The prediction results.
         """
 
-    def __init__(self, model='yolov8n.pt', type='v8') -> None:
+    def __init__(self, model='yolov8n.pt', type='v8', weight=None) -> None:
         """
         Initializes the YOLO model.
 
@@ -97,14 +97,14 @@ class YOLO:
         if not suffix and Path(model).stem in GITHUB_ASSET_STEMS:
             model, suffix = Path(model).with_suffix('.pt'), '.pt'  # add suffix, i.e. yolov8n -> yolov8n.pt
         if suffix == '.yaml':
-            self._new(model)
+            self._new(model, weight=weight)
         else:
             self._load(model)
 
     def __call__(self, source=None, stream=False, **kwargs):
         return self.predict(source, stream, **kwargs)
 
-    def _new(self, cfg: str, verbose=True):
+    def _new(self, cfg: str, verbose=True, weight=None):
         """
         Initializes a new model and infers the task type from the model definitions.
 
@@ -119,26 +119,16 @@ class YOLO:
         self.model = self.ModelClass(cfg_dict, verbose=verbose and RANK == -1)  # initialize
         self.overrides['model'] = self.cfg
 
-        # pt = "yolov8s.pt"  ## TODO: Change model's weight
-        def get_model_domain(cfg):
-            domains = ["yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x"]
-            for domain in domains:
-                if domain in cfg:
-                    return domain
-            return None
-        
-        model_domain = get_model_domain(cfg)
-        if model_domain:
-            # pt = model_domain + "_pretrained.pt"
-            pt = model_domain + ".pt"
-        else:
-            print("Warning: wrong format of model config file name!")
-            pt = "yolov8s.pt"
-        ckpt = torch.load(pt)
-        csd = ckpt["model"].float().state_dict()
-        csd = intersect_dicts(csd, self.model.state_dict())
-        self.model.load_state_dict(csd, strict=False)
-        print(f"Transferred {len(csd)}/{len(self.model.state_dict())} from {pt}")
+        if weight:
+            assert weight.endswith(".pt")
+            pt = weight
+            ckpt = torch.load(pt)
+            csd = ckpt["model"].float().state_dict()
+            csd = intersect_dicts(csd, self.model.state_dict())
+            self.model.load_state_dict(csd, strict=False)
+            print(f"Transferred {len(csd)}/{len(self.model.state_dict())} from {pt}")
+            self.ckpt = ckpt
+            self.ckpt_path = weight
 
 
     def _load(self, weights: str):
