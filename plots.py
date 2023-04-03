@@ -23,7 +23,9 @@ csvs2labels = {
     # "runs/train_07_imgsz/train_e1000_iou3_b16_i960_kfiou_valriou_noatt_close200_amend/results.csv":   "i960(1000e, close200, KFIoU)",
     # "runs/train_07_imgsz/train_e1000_iou3_b8_i1280_kfiou_valriou_noatt_close200/results.csv":  "i1280(1000e, close200, KFIoU)",
     "runs/train_08_miou/train_e1000_iou3_b16_i640_miou_valriou_noatt_close200/results.csv":     "i640(1000e, close200, MIoU)",
-    "runs/train_10_smooth/trainl_e1000_iou3_b16_i640_miou_valriou_noatt_close200_smooth0/results.csv": "i640(1000e, close200, MIoU, No Smooth)",
+    # "runs/train_10_smooth/trainl_e1000_iou3_b16_i640_miou_valriou_noatt_close200_smooth0/results.csv": "i640(1000e, close200, MIoU, No Smooth)",
+    "runs/train_11_clip/t11_e1000_iou3_b16_i640_miou_valriou_noatt_close200/results.csv": "i640(1000e, close200, MIoU, clip)",
+    "runs/train_11_clip/t11_e800_iou3_b16_i640_miou_valriou_noatt_close100/results.csv": "i640(800e, close100, MIoU, clip)",
 }
 
 # img_caption = "train_06_epochs"
@@ -34,8 +36,10 @@ csvs2labels = {
 # img_path = "runs/train_07_imgsz/plot.png"
 # img_caption = "train_08_miou"
 # img_path = "runs/train_08_miou/plot.png"
-img_caption = "train_10_smooth"
-img_path = "runs/train_10_smooth/plot.png"
+# img_caption = "train_10_smooth"
+# img_path = "runs/train_10_smooth/plot.png"
+img_caption = "train_11_clip"
+img_path = "runs/train_11_clip/plot.png"
 
 map50_95_lists = [[] for _ in range(len(csvs2labels))]
 
