@@ -248,6 +248,8 @@ def obb_iou(box1, box2, eps=1e-7, choice="miou"):
         box2 = xyxyxyxya2xywha(box2)
         iou = kfiou(box1, box2, box1, box2)
         iou = iou.unsqueeze(-1)
+    else:
+        assert False, f"\nobb_iou function: illegal iou choice {choice}\n"
         
     assert iou.shape[-1] == 1
     return iou

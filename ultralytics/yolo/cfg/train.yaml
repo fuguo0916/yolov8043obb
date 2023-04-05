@@ -56,6 +56,7 @@ half: False  # use half precision (FP16)
 dnn: False  # use OpenCV DNN for ONNX inference
 plots: True  # save plots during train/val
 valiou: "rotated_iou" # choice ["rotated_iou", "miou", "eiou"]
+loss_choice: "kfiou" # choice ["kfiou", "miou"]
 
 # Prediction settings --------------------------------------------------------------------------------------------------
 source:  # source directory for images or videos

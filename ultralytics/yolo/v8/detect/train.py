@@ -75,7 +75,7 @@ class DetectionTrainer(BaseTrainer):
 
     def criterion(self, preds, batch):
         if not hasattr(self, 'compute_loss'):
-            self.compute_loss = Loss(de_parallel(self.model))
+            self.compute_loss = Loss(de_parallel(self.model), loss_choice=self.args.loss_choice)
         return self.compute_loss(preds, batch)
 
     def label_loss_items(self, loss_items=None, prefix='train'):
@@ -114,7 +114,7 @@ class DetectionTrainer(BaseTrainer):
 # Criterion class for computing training losses
 class Loss:
 
-    def __init__(self, model):  # model must be de-paralleled
+    def __init__(self, model, loss_choice=None):  # model must be de-paralleled
 
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -130,13 +130,14 @@ class Loss:
 
         self.use_dfl = m.reg_max > 1
         roll_out_thr = h.min_memory if h.min_memory > 1 else 64 if h.min_memory else 0  # 64 is default
+        self.loss_choice = loss_choice if loss_choice else "miou"
 
         self.assigner = TaskAlignedAssigner(topk=10,
                                             num_classes=self.nc,
                                             alpha=0.5,
                                             beta=6.0,
                                             roll_out_thr=roll_out_thr)
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl, loss_choice=self.loss_choice).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):

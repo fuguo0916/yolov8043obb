@@ -24,10 +24,11 @@ class VarifocalLoss(nn.Module):
 
 class BboxLoss(nn.Module):
 
-    def __init__(self, reg_max, use_dfl=False):
+    def __init__(self, reg_max, use_dfl=False, loss_choice=None):
         super().__init__()
         self.reg_max = reg_max
         self.use_dfl = use_dfl
+        self.loss_choice = loss_choice if loss_choice else "miou"
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """FG
@@ -42,7 +43,7 @@ class BboxLoss(nn.Module):
         """
         # IoU loss
         weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)  ## (np, 1)
-        iou = obb_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask])  # bbox_iou ## (np, 1)
+        iou = obb_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], choice=self.loss_choice)  # bbox_iou ## (np, 1)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
