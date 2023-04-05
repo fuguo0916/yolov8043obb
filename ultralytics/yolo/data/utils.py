@@ -191,6 +191,21 @@ def polygons2masks_overlap(imgsz, segments, downsample_ratio=1):
 
 
 def check_det_dataset(dataset, autodownload=True):
+    ## check data config if it is supplied in train config
+    if isinstance(dataset, dict):
+        assert "nc" in dataset.keys()
+        assert "train" in dataset.keys()
+        assert "val" in dataset.keys()
+        assert "names" in dataset.keys()
+        assert "path" in dataset.keys()
+        assert dataset["nc"] == len(dataset["names"])
+        dataset['names'] = dict(enumerate(dataset['names']))
+        for key in ["val", "train", "path"]:
+            dataset[key] = Path(dataset[key])
+            if not dataset[key].is_absolute():
+                dataset[key] = (Path(os.getcwd()) / dataset[key]).resolve()
+        return dataset
+    
     # Download, check and/or unzip dataset if not found locally
     data = check_file(dataset)
 

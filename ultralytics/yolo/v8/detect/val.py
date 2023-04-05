@@ -50,7 +50,7 @@ class DetectionValidator(BaseValidator):
         self.nc = len(model.names)
         self.metrics.names = self.names
         self.metrics.plot = self.args.plots
-        self.confusion_matrix = ConfusionMatrix(nc=self.nc)
+        self.confusion_matrix = ConfusionMatrix(nc=self.nc, valiou=self.valiou)
         self.seen = 0
         self.jdict = []
         self.stats = []
@@ -170,7 +170,7 @@ class DetectionValidator(BaseValidator):
         Returns:
             correct (array[npr, 10]), for 10 IoU levels
         """
-        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9])  # box_iou ## Tensor(nl, npr)
+        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9], self.valiou)  # box_iou ## Tensor(nl, npr)
         correct = np.zeros((detections.shape[0], self.iouv.shape[0])).astype(bool)  ## Tensor(npr, niou)
         correct_class = labels[:, 0:1] == detections[:, 10]  # mask, Tensor(nl, npr)
         for i in range(len(self.iouv)):

@@ -12,7 +12,8 @@ mode: train  # YOLO mode, i.e. train, val, predict, export
 
 # Train settings -------------------------------------------------------------------------------------------------------
 model:  # path to model file, i.e. yolov8n.pt, yolov8n.yaml
-data: mydata.yaml # path to data file, i.e. i.e. coco128.yaml
+# data: mydata/mydata.yaml # path to data file, i.e. i.e. coco128.yaml
+data: {nc: 3, names: ["aircraft_carrier", "warcraft", "merchant_ship"], train: mydata/train.txt, val: mydata/val.txt, path: mydata}
 epochs: 100  # number of epochs to train for
 patience: 50  # epochs to wait for no observable improvement for early stopping of training
 batch: 16  # number of images per batch (-1 for AutoBatch)
@@ -54,6 +55,7 @@ max_det: 300  # maximum number of detections per image
 half: False  # use half precision (FP16)
 dnn: False  # use OpenCV DNN for ONNX inference
 plots: True  # save plots during train/val
+valiou: "rotated_iou" # choice ["rotated_iou", "miou", "eiou"]
 
 # Prediction settings --------------------------------------------------------------------------------------------------
 source:  # source directory for images or videos

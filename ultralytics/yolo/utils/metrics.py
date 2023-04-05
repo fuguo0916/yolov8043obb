@@ -435,11 +435,12 @@ class FocalLoss(nn.Module):
 
 class ConfusionMatrix:
     # Updated version of https://github.com/kaanakan/object_detection_confusion_matrix
-    def __init__(self, nc, conf=0.25, iou_thres=0.45):
+    def __init__(self, nc, conf=0.25, iou_thres=0.45, valiou=None):
         self.matrix = np.zeros((nc + 1, nc + 1))
         self.nc = nc  # number of classes
         self.conf = conf
         self.iou_thres = iou_thres
+        self.valiou = valiou if valiou else "rotated_iou"
 
     def process_batch(self, detections, labels):
         """
@@ -460,7 +461,7 @@ class ConfusionMatrix:
         detections = detections[detections[:, 9] > self.conf]
         gt_classes = labels[:, 0].int()
         detection_classes = detections[:, 10].int()
-        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9])  # (num_gt, num_pred)
+        iou = obb_iou_for_metrics(labels[:, 1:], detections[:, :9], self.valiou)  # (num_gt, num_pred)
 
         x = torch.where(iou > self.iou_thres)  # (n_pass, 2)
         if x[0].shape[0]:
